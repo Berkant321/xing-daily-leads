@@ -183,9 +183,18 @@ def safe_get(url, params=None, timeout=15):
             timeout=timeout,
             allow_redirects=True,
         )
-        response.raise_for_status()
+
+        if response.status_code != 200:
+            st.error(
+                f"API-Fehler {response.status_code}: "
+                f"{response.text[:500]}"
+            )
+            return None
+
         return response
-    except requests.RequestException:
+
+    except requests.RequestException as exc:
+        st.error(f"Verbindungsfehler: {exc}")
         return None
 
 
