@@ -39,9 +39,50 @@ API_HEADERS = {
 }
 
 DEFAULT_SEARCH_TERMS = [
+    # Gesundheit & Therapie
+    "Physiotherapeut",
+    "Ergotherapeut",
+    "Logopäde",
+    "Pflegefachkraft",
+    "Medizinische Fachangestellte",
+
+    # Handwerk & Technik
+    "Elektroniker",
+    "Mechatroniker",
+    "Anlagenmechaniker",
+    "Schweißer",
+    "Industriemechaniker",
+    "Servicetechniker",
+
+    # Bau & Engineering
+    "Bauleiter",
+    "Architekt",
+    "Projektingenieur",
+    "Elektroingenieur",
+    "Konstrukteur",
+
+    # IT
+    "Softwareentwickler",
+    "Systemadministrator",
+    "IT Support",
+    "DevOps Engineer",
+
+    # Vertrieb & kaufmännisch
+    "Vertriebsmitarbeiter",
+    "Account Manager",
+    "Sachbearbeiter",
+    "Buchhalter",
+    "Controller",
+
+    # Steuer & Recht
     "Steuerfachangestellte",
     "Steuerfachwirt",
     "Bilanzbuchhalter",
+
+    # Logistik
+    "Berufskraftfahrer",
+    "Disponent",
+    "Fachkraft Lagerlogistik",
 ]
 
 DEFAULT_REGIONS = [
