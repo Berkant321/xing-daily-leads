@@ -1,7 +1,8 @@
-streamlit>=1.37
-pandas>=2.1
+streamlit>=1.40
+pandas>=2.2
 requests>=2.31
 beautifulsoup4>=4.12
 tldextract>=5.1
 gspread>=6.1
-google-auth>=2.30
+google-auth>=2.29
+lxml>=5.2

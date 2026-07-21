@@ -14,6 +14,8 @@ import streamlit as st
 import tldextract
 from bs4 import BeautifulSoup
 
+from scanner import scan_jobs
+
 try:
     import gspread
     from google.oauth2.service_account import Credentials
@@ -174,8 +176,7 @@ def lead_id(company):
     return hashlib.sha1(normalize_company(company).encode("utf-8")).hexdigest()[:14]
 
 
-def safe_get(url, params=None, timeout=15, error_bucket=None):
-    """HTTP-Aufruf mit sichtbarer Fehlerdiagnose statt stiller Abbrüche."""
+def safe_get(url, params=None, timeout=15):
     try:
         response = requests.get(
             url,
@@ -184,19 +185,9 @@ def safe_get(url, params=None, timeout=15, error_bucket=None):
             timeout=timeout,
             allow_redirects=True,
         )
-        if response.status_code != 200:
-            message = (
-                f"HTTP {response.status_code} bei {response.url}: "
-                f"{clean_text(response.text)[:300]}"
-            )
-            if error_bucket is not None:
-                error_bucket.append(message)
-            return None
+        response.raise_for_status()
         return response
-    except requests.RequestException as exc:
-        message = f"Verbindungsfehler bei {url}: {exc}"
-        if error_bucket is not None:
-            error_bucket.append(message)
+    except requests.RequestException:
         return None
 
 
@@ -331,7 +322,7 @@ storage = Storage()
 # BA-JOBFINDER
 # ============================================================
 
-def fetch_search(term, city, radius, days, max_pages, errors=None):
+def fetch_search(term, city, radius, days, max_pages):
     jobs = []
     for page in range(1, max_pages + 1):
         params = {
@@ -345,7 +336,7 @@ def fetch_search(term, city, radius, days, max_pages, errors=None):
             "zeitarbeit": "false",
             "pav": "false",
         }
-        response = safe_get(f"{API_BASE}/pc/v6/jobs", params=params, error_bucket=errors)
+        response = safe_get(f"{API_BASE}/pc/v6/jobs", params=params)
         if not response:
             break
         payload = response.json()
@@ -361,17 +352,17 @@ def fetch_search(term, city, radius, days, max_pages, errors=None):
     return jobs
 
 
-def fetch_details(reference, errors=None):
+def fetch_details(reference):
     if not reference:
         return {}
     encoded = base64.b64encode(reference.encode("utf-8")).decode("utf-8")
-    response = safe_get(f"{API_BASE}/pc/v4/jobdetails/{encoded}", error_bucket=errors)
+    response = safe_get(f"{API_BASE}/pc/v4/jobdetails/{encoded}")
     return response.json() if response else {}
 
 
-def parse_job(raw, errors=None):
+def parse_job(raw):
     reference = clean_text(first_value(raw, ["referenznummer", "refnr", "refNr"]))
-    details = fetch_details(reference, errors=errors)
+    details = fetch_details(reference)
 
     company = clean_text(
         first_value(raw, ["arbeitgeber", "arbeitgeberName", "firma"])
@@ -764,9 +755,6 @@ st.sidebar.caption(
 )
 
 df = storage.load().reindex(columns=COLUMNS).fillna("")
-if "last_scan_df" in st.session_state and not st.session_state["last_scan_df"].empty:
-    # Aktuelles Suchergebnis hat Vorrang vor einem eventuell noch leeren lokalen CSV-Stand.
-    df = st.session_state["last_scan_df"].reindex(columns=COLUMNS).fillna("")
 exclusions = storage.load_exclusions()
 
 if page == "Daily Leads":
@@ -782,10 +770,30 @@ if page == "Daily Leads":
             "Regionen – Format: Ort,Umkreis",
             "\n".join(f"{city},{radius}" for city, radius in DEFAULT_REGIONS),
         )
+        st.markdown("#### Quellen")
+        source_cols = st.columns(3)
+        use_ba = source_cols[0].checkbox("Bundesagentur", value=True)
+        use_google = source_cols[1].checkbox(
+            "Google Jobs", value=("serpapi_key" in st.secrets),
+            help="Benötigt einen SerpApi-Key in den Streamlit-Secrets."
+        )
+        use_careers = source_cols[2].checkbox("Karriereseiten / ATS", value=True)
+
+        career_urls_text = st.text_area(
+            "Karriereseiten oder ATS-Boards – eine URL je Zeile",
+            placeholder=(
+                "https://firma.jobs.personio.de\n"
+                "https://boards.greenhouse.io/firma\n"
+                "https://jobs.lever.co/firma\n"
+                "https://firma.de/karriere"
+            ),
+            help="Personio, Greenhouse, Lever und JobPosting-Daten werden automatisch erkannt.",
+        )
+
         col1, col2, col3 = st.columns(3)
-        days = col1.number_input("Veröffentlicht seit Tagen", 1, 14, 2)
-        max_pages = col2.number_input("Seiten pro Suche", 1, 20, 5)
-        max_research = col3.number_input("Websites recherchieren", 0, 100, 25)
+        days = col1.number_input("Veröffentlicht seit Tagen", 1, 30, 7)
+        max_pages = col2.number_input("Seiten pro BA-Suche", 1, 10, 1)
+        max_research = col3.number_input("Websites recherchieren", 0, 100, 15)
 
         uploaded = st.file_uploader(
             "Optional: Salesforce-CSV hochladen – Firmen werden künftig ausgeschlossen",
@@ -814,67 +822,59 @@ if page == "Daily Leads":
                 city, radius = line.rsplit(",", 1)
                 regions.append((city.strip(), int(radius.strip())))
 
-            progress = st.progress(0, text="Suche läuft …")
-            raw_jobs = []
-            request_errors = []
-            total = max(1, len(search_terms) * len(regions))
-            step = 0
-            for term in search_terms:
-                for city, radius in regions:
-                    raw_jobs.extend(fetch_search(term, city, radius, days, max_pages, errors=request_errors))
-                    step += 1
-                    progress.progress(step / total, text=f"{term} · {city}")
+            active_sources = []
+            if use_ba:
+                active_sources.append("Bundesagentur")
+            if use_google:
+                active_sources.append("Google Jobs")
+            if use_careers:
+                active_sources.append("Karriereseiten")
 
-            seen, parsed = set(), []
-            for raw in raw_jobs:
-                reference = clean_text(first_value(raw, ["referenznummer", "refnr", "refNr"]))
-                if reference and reference in seen:
-                    continue
-                if reference:
-                    seen.add(reference)
-                job = parse_job(raw, errors=request_errors)
-                if job["company"]:
-                    parsed.append(job)
+            if not active_sources:
+                st.error("Bitte mindestens eine Quelle aktivieren.")
+                st.stop()
+
+            career_urls = [
+                line.strip() for line in career_urls_text.splitlines()
+                if line.strip()
+            ]
+            serpapi_key = str(st.secrets.get("serpapi_key", ""))
+
+            progress = st.progress(0, text="Mehrquellen-Suche läuft …")
+            parsed, diagnostics = scan_jobs(
+                terms=search_terms,
+                regions=regions,
+                days=int(days),
+                max_pages=int(max_pages),
+                sources=active_sources,
+                career_urls=career_urls,
+                serpapi_key=serpapi_key,
+            )
+            progress.progress(0.75, text="Firmen werden gruppiert und recherchiert …")
 
             fresh = build_leads(parsed, exclusions, int(max_research))
             merged, inserted, updated = upsert(df, fresh)
             storage.save(merged)
             progress.empty()
 
-            # Ergebnis zusätzlich in der laufenden Sitzung halten. So ist es sofort sichtbar,
-            # auch wenn der lokale Dateispeicher auf Streamlit später neu gestartet wird.
-            st.session_state["last_scan_df"] = merged.copy()
-            st.session_state["last_scan_stats"] = {
-                "raw_jobs": len(raw_jobs),
-                "parsed_jobs": len(parsed),
-                "fresh_leads": len(fresh),
-                "saved_leads": len(merged),
-                "inserted": inserted,
-                "updated": updated,
-                "errors": request_errors[:20],
-            }
+            st.success(
+                f"{inserted} neue Firmen, {updated} bestehende Firmen aktualisiert."
+            )
+            st.write(f"Gefundene eindeutige Stellen: {len(parsed)}")
+            st.write(f"Erstellte Firmen-Leads: {len(fresh)}")
+            st.write(f"Gespeicherte Leads insgesamt: {len(merged)}")
 
-            st.success(f"{inserted} neue Firmen, {updated} bestehende Firmen aktualisiert.")
-            st.write(f"**Gefundene Rohstellen:** {len(raw_jobs)}")
-            st.write(f"**Ausgewertete Stellen:** {len(parsed)}")
-            st.write(f"**Erstellte Firmen-Leads:** {len(fresh)}")
-            st.write(f"**Gespeicherte Leads insgesamt:** {len(merged)}")
-
-            if request_errors:
-                with st.expander(f"Technische Hinweise ({len(request_errors)})"):
-                    for error in request_errors[:20]:
-                        st.code(error)
+            with st.expander("Technische Details"):
+                for message in diagnostics:
+                    st.write(f"• {message}")
 
             if fresh.empty:
                 st.warning(
-                    "Die Suche wurde ausgeführt, aber es entstanden keine Firmen-Leads. "
-                    "Die Zahlen und technischen Hinweise oben zeigen, an welcher Stufe es hängt."
+                    "Keine Firmen-Leads entstanden. Öffne die technischen Details direkt hier."
                 )
             else:
-                st.info("Die Ergebnisse werden direkt unterhalb des Suchbereichs angezeigt.")
-
-            # Wichtig: kein sofortiges st.rerun(), sonst verschwinden Diagnose und Erfolgsmeldung.
-            df = merged.copy()
+                st.session_state["last_scan_ok"] = True
+                st.info("Die Leads stehen direkt weiter unten auf dieser Seite.")
 
     if df.empty:
         st.info("Noch keine Leads vorhanden. Starte oben die erste Suche.")
