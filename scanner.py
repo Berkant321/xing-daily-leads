@@ -222,6 +222,117 @@ def scan_ba(
     return parsed
 
 
+
+# ---------------------------------------------------------------------------
+# 2) Adzuna – automatische Jobsuche für Deutschland
+# ---------------------------------------------------------------------------
+
+def scan_adzuna(
+    terms: list[str],
+    regions: list[tuple[str, int]],
+    days: int,
+    max_pages: int,
+    app_id: str,
+    api_key: str,
+    diagnostics: list[str],
+) -> list[dict]:
+    if not app_id or not api_key:
+        diagnostics.append(
+            "Adzuna: nicht aktiv – adzuna_app_id oder adzuna_api_key fehlt in den Streamlit-Secrets."
+        )
+        return []
+
+    jobs: list[dict] = []
+    request_count = 0
+    page_limit = max(1, min(int(max_pages), 3))
+
+    for term in terms:
+        for city, radius in regions:
+            for page in range(1, page_limit + 1):
+                params = {
+                    "app_id": app_id,
+                    "app_key": api_key,
+                    "what": term,
+                    "where": city,
+                    "distance": radius,
+                    "max_days_old": days,
+                    "results_per_page": 50,
+                    "content-type": "application/json",
+                    "sort_by": "date",
+                }
+                response, error = _get(
+                    f"https://api.adzuna.com/v1/api/jobs/de/search/{page}",
+                    params=params,
+                    timeout=30,
+                )
+                request_count += 1
+
+                if error:
+                    diagnostics.append(f"Adzuna {term} · {city}: {error}")
+                    break
+
+                try:
+                    payload = response.json() if response else {}
+                except ValueError:
+                    diagnostics.append(
+                        f"Adzuna {term} · {city}: ungültige JSON-Antwort"
+                    )
+                    break
+
+                batch = payload.get("results") or []
+                if not batch:
+                    break
+
+                for item in batch:
+                    company_data = item.get("company") or {}
+                    location_data = item.get("location") or {}
+                    category_data = item.get("category") or {}
+
+                    company = _clean(
+                        company_data.get("display_name")
+                        if isinstance(company_data, dict)
+                        else company_data
+                    )
+                    title = _clean(item.get("title"))
+
+                    if not company or not title:
+                        continue
+
+                    description = _clean(item.get("description"))
+                    category = _clean(
+                        category_data.get("label")
+                        if isinstance(category_data, dict)
+                        else category_data
+                    )
+                    if category:
+                        description = f"{category}. {description}".strip()
+
+                    jobs.append(_job(
+                        company=company,
+                        title=title,
+                        city=(
+                            location_data.get("display_name", city)
+                            if isinstance(location_data, dict)
+                            else city
+                        ),
+                        published=item.get("created", ""),
+                        description=description,
+                        url=item.get("redirect_url", ""),
+                        source="Adzuna",
+                        reference=str(item.get("id", "")),
+                        term=term,
+                    ))
+
+                if len(batch) < 50:
+                    break
+                time.sleep(0.08)
+
+    diagnostics.append(
+        f"Adzuna: {len(jobs)} Stellen aus {request_count} Suchanfragen."
+    )
+    return jobs
+
+
 # ---------------------------------------------------------------------------
 # 2) Google Jobs über SerpApi (optional)
 # ---------------------------------------------------------------------------
@@ -526,9 +637,22 @@ def scan_jobs(
     sources: list[str],
     career_urls: list[str] | None = None,
     serpapi_key: str = "",
+    adzuna_app_id: str = "",
+    adzuna_api_key: str = "",
 ) -> tuple[list[dict], list[str]]:
     diagnostics: list[str] = []
     jobs: list[dict] = []
+
+    if "Adzuna" in sources:
+        jobs.extend(scan_adzuna(
+            terms,
+            regions,
+            days,
+            max_pages,
+            adzuna_app_id,
+            adzuna_api_key,
+            diagnostics,
+        ))
 
     if "Bundesagentur" in sources:
         jobs.extend(scan_ba(terms, regions, days, max_pages, diagnostics))

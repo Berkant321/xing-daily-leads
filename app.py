@@ -771,13 +771,26 @@ if page == "Daily Leads":
             "\n".join(f"{city},{radius}" for city, radius in DEFAULT_REGIONS),
         )
         st.markdown("#### Quellen")
-        source_cols = st.columns(3)
-        use_ba = source_cols[0].checkbox("Bundesagentur", value=True)
-        use_google = source_cols[1].checkbox(
-            "Google Jobs", value=("serpapi_key" in st.secrets),
-            help="Benötigt einen SerpApi-Key in den Streamlit-Secrets."
+        source_cols = st.columns(4)
+        use_adzuna = source_cols[0].checkbox(
+            "Adzuna",
+            value=True,
+            help="Automatische Jobsuche in Deutschland über deine hinterlegten Adzuna-Zugangsdaten.",
         )
-        use_careers = source_cols[2].checkbox("Karriereseiten / ATS", value=True)
+        use_ba = source_cols[1].checkbox(
+            "Bundesagentur",
+            value=False,
+            help="Optionale Zusatzquelle. Ist standardmäßig ausgeschaltet.",
+        )
+        use_google = source_cols[2].checkbox(
+            "Google Jobs",
+            value=("serpapi_key" in st.secrets),
+            help="Benötigt zusätzlich einen SerpApi-Key in den Streamlit-Secrets.",
+        )
+        use_careers = source_cols[3].checkbox(
+            "Karriereseiten / ATS",
+            value=True,
+        )
 
         career_urls_text = st.text_area(
             "Karriereseiten oder ATS-Boards – eine URL je Zeile",
@@ -823,6 +836,8 @@ if page == "Daily Leads":
                 regions.append((city.strip(), int(radius.strip())))
 
             active_sources = []
+            if use_adzuna:
+                active_sources.append("Adzuna")
             if use_ba:
                 active_sources.append("Bundesagentur")
             if use_google:
@@ -839,6 +854,16 @@ if page == "Daily Leads":
                 if line.strip()
             ]
             serpapi_key = str(st.secrets.get("serpapi_key", ""))
+            adzuna_app_id = str(st.secrets.get("adzuna_app_id", ""))
+            adzuna_api_key = str(st.secrets.get("adzuna_api_key", ""))
+
+            if use_adzuna and (not adzuna_app_id or not adzuna_api_key):
+                st.error(
+                    "Adzuna ist aktiviert, aber die Zugangsdaten fehlen. "
+                    "Prüfe in Streamlit unter Settings → Secrets die Einträge "
+                    "adzuna_app_id und adzuna_api_key."
+                )
+                st.stop()
 
             progress = st.progress(0, text="Mehrquellen-Suche läuft …")
             parsed, diagnostics = scan_jobs(
@@ -849,6 +874,8 @@ if page == "Daily Leads":
                 sources=active_sources,
                 career_urls=career_urls,
                 serpapi_key=serpapi_key,
+                adzuna_app_id=adzuna_app_id,
+                adzuna_api_key=adzuna_api_key,
             )
             progress.progress(0.75, text="Firmen werden gruppiert und recherchiert …")
 
