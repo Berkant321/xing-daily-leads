@@ -174,7 +174,8 @@ def lead_id(company):
     return hashlib.sha1(normalize_company(company).encode("utf-8")).hexdigest()[:14]
 
 
-def safe_get(url, params=None, timeout=15):
+def safe_get(url, params=None, timeout=15, error_bucket=None):
+    """HTTP-Aufruf mit sichtbarer Fehlerdiagnose statt stiller Abbrüche."""
     try:
         response = requests.get(
             url,
@@ -183,18 +184,19 @@ def safe_get(url, params=None, timeout=15):
             timeout=timeout,
             allow_redirects=True,
         )
-
         if response.status_code != 200:
-            st.error(
-                f"API-Fehler {response.status_code}: "
-                f"{response.text[:500]}"
+            message = (
+                f"HTTP {response.status_code} bei {response.url}: "
+                f"{clean_text(response.text)[:300]}"
             )
+            if error_bucket is not None:
+                error_bucket.append(message)
             return None
-
         return response
-
     except requests.RequestException as exc:
-        st.error(f"Verbindungsfehler: {exc}")
+        message = f"Verbindungsfehler bei {url}: {exc}"
+        if error_bucket is not None:
+            error_bucket.append(message)
         return None
 
 
@@ -329,7 +331,7 @@ storage = Storage()
 # BA-JOBFINDER
 # ============================================================
 
-def fetch_search(term, city, radius, days, max_pages):
+def fetch_search(term, city, radius, days, max_pages, errors=None):
     jobs = []
     for page in range(1, max_pages + 1):
         params = {
@@ -343,7 +345,7 @@ def fetch_search(term, city, radius, days, max_pages):
             "zeitarbeit": "false",
             "pav": "false",
         }
-        response = safe_get(f"{API_BASE}/pc/v6/jobs", params=params)
+        response = safe_get(f"{API_BASE}/pc/v6/jobs", params=params, error_bucket=errors)
         if not response:
             break
         payload = response.json()
@@ -359,17 +361,17 @@ def fetch_search(term, city, radius, days, max_pages):
     return jobs
 
 
-def fetch_details(reference):
+def fetch_details(reference, errors=None):
     if not reference:
         return {}
     encoded = base64.b64encode(reference.encode("utf-8")).decode("utf-8")
-    response = safe_get(f"{API_BASE}/pc/v4/jobdetails/{encoded}")
+    response = safe_get(f"{API_BASE}/pc/v4/jobdetails/{encoded}", error_bucket=errors)
     return response.json() if response else {}
 
 
-def parse_job(raw):
+def parse_job(raw, errors=None):
     reference = clean_text(first_value(raw, ["referenznummer", "refnr", "refNr"]))
-    details = fetch_details(reference)
+    details = fetch_details(reference, errors=errors)
 
     company = clean_text(
         first_value(raw, ["arbeitgeber", "arbeitgeberName", "firma"])
@@ -762,6 +764,9 @@ st.sidebar.caption(
 )
 
 df = storage.load().reindex(columns=COLUMNS).fillna("")
+if "last_scan_df" in st.session_state and not st.session_state["last_scan_df"].empty:
+    # Aktuelles Suchergebnis hat Vorrang vor einem eventuell noch leeren lokalen CSV-Stand.
+    df = st.session_state["last_scan_df"].reindex(columns=COLUMNS).fillna("")
 exclusions = storage.load_exclusions()
 
 if page == "Daily Leads":
@@ -811,11 +816,12 @@ if page == "Daily Leads":
 
             progress = st.progress(0, text="Suche läuft …")
             raw_jobs = []
+            request_errors = []
             total = max(1, len(search_terms) * len(regions))
             step = 0
             for term in search_terms:
                 for city, radius in regions:
-                    raw_jobs.extend(fetch_search(term, city, radius, days, max_pages))
+                    raw_jobs.extend(fetch_search(term, city, radius, days, max_pages, errors=request_errors))
                     step += 1
                     progress.progress(step / total, text=f"{term} · {city}")
 
@@ -826,7 +832,7 @@ if page == "Daily Leads":
                     continue
                 if reference:
                     seen.add(reference)
-                job = parse_job(raw)
+                job = parse_job(raw, errors=request_errors)
                 if job["company"]:
                     parsed.append(job)
 
@@ -834,8 +840,41 @@ if page == "Daily Leads":
             merged, inserted, updated = upsert(df, fresh)
             storage.save(merged)
             progress.empty()
+
+            # Ergebnis zusätzlich in der laufenden Sitzung halten. So ist es sofort sichtbar,
+            # auch wenn der lokale Dateispeicher auf Streamlit später neu gestartet wird.
+            st.session_state["last_scan_df"] = merged.copy()
+            st.session_state["last_scan_stats"] = {
+                "raw_jobs": len(raw_jobs),
+                "parsed_jobs": len(parsed),
+                "fresh_leads": len(fresh),
+                "saved_leads": len(merged),
+                "inserted": inserted,
+                "updated": updated,
+                "errors": request_errors[:20],
+            }
+
             st.success(f"{inserted} neue Firmen, {updated} bestehende Firmen aktualisiert.")
-            st.rerun()
+            st.write(f"**Gefundene Rohstellen:** {len(raw_jobs)}")
+            st.write(f"**Ausgewertete Stellen:** {len(parsed)}")
+            st.write(f"**Erstellte Firmen-Leads:** {len(fresh)}")
+            st.write(f"**Gespeicherte Leads insgesamt:** {len(merged)}")
+
+            if request_errors:
+                with st.expander(f"Technische Hinweise ({len(request_errors)})"):
+                    for error in request_errors[:20]:
+                        st.code(error)
+
+            if fresh.empty:
+                st.warning(
+                    "Die Suche wurde ausgeführt, aber es entstanden keine Firmen-Leads. "
+                    "Die Zahlen und technischen Hinweise oben zeigen, an welcher Stufe es hängt."
+                )
+            else:
+                st.info("Die Ergebnisse werden direkt unterhalb des Suchbereichs angezeigt.")
+
+            # Wichtig: kein sofortiges st.rerun(), sonst verschwinden Diagnose und Erfolgsmeldung.
+            df = merged.copy()
 
     if df.empty:
         st.info("Noch keine Leads vorhanden. Starte oben die erste Suche.")
