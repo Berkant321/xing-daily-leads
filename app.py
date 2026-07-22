@@ -143,7 +143,7 @@ COLUMNS = [
     "offene_stellen", "anzahl_stellen", "orte", "veroeffentlicht_am",
     "zuletzt_gefunden", "benefits", "ansprechpartner", "rolle",
     "email", "telefon", "website", "kontaktseite", "stellenlink",
-    "erstmail_betreff", "erstmail", "call_opener", "discovery_fragen",
+    "crm_status", "erstmail_betreff", "erstmail", "call_opener", "discovery_fragen",
     "follow_up_1", "follow_up_2", "status", "wiedervorlage", "notiz",
 ]
 
@@ -323,6 +323,62 @@ class Storage:
 storage = Storage()
 
 
+def read_company_file(uploaded_file):
+    """Liest Salesforce-Exporte aus CSV oder XLSX und erkennt die Firmenspalte."""
+    name = uploaded_file.name.lower()
+    if name.endswith(".xlsx"):
+        frame = pd.read_excel(uploaded_file, dtype=str).fillna("")
+    else:
+        raw = uploaded_file.getvalue()
+        frame = None
+        for encoding in ("utf-8-sig", "utf-8", "latin1"):
+            try:
+                frame = pd.read_csv(
+                    pd.io.common.BytesIO(raw),
+                    dtype=str,
+                    sep=None,
+                    engine="python",
+                    encoding=encoding,
+                ).fillna("")
+                break
+            except Exception:
+                continue
+        if frame is None:
+            raise ValueError("CSV konnte nicht gelesen werden.")
+
+    aliases = [
+        "account name", "account", "firmenname", "firma", "unternehmen",
+        "company", "name des accounts", "kunde", "kundenname"
+    ]
+    normalized_columns = {normalize_company(col): col for col in frame.columns}
+    company_col = next(
+        (original for normalized, original in normalized_columns.items()
+         if any(alias in normalized for alias in aliases)),
+        None,
+    )
+    if not company_col:
+        raise ValueError(
+            "Keine Firmenspalte erkannt. Benenne sie z. B. 'Account Name', 'Firma' oder 'Unternehmen'."
+        )
+    companies = {
+        normalize_company(value)
+        for value in frame[company_col].astype(str)
+        if normalize_company(value)
+    }
+    return companies, company_col, len(frame)
+
+
+def apply_crm_status(frame, exclusions):
+    if frame.empty:
+        return frame
+    frame = frame.copy()
+    normalized = frame["firma"].map(normalize_company)
+    frame["crm_status"] = normalized.map(
+        lambda value: "Bereits in Salesforce" if value in exclusions else "Neu"
+    )
+    return frame
+
+
 # ============================================================
 # BA-JOBFINDER
 # ============================================================
@@ -434,6 +490,14 @@ def parse_job(raw):
 # WEBSITE-RECHERCHE
 # ============================================================
 
+
+BLOCKED_JOB_DOMAINS = {
+    "adzuna.de", "adzuna.com", "indeed.com", "indeed.de", "stepstone.de",
+    "linkedin.com", "xing.com", "arbeitsagentur.de", "meinestadt.de",
+    "stellenanzeigen.de", "jobware.de", "kimeta.de", "jooble.org",
+    "glassdoor.de", "monster.de", "talent.com", "jobrapido.com",
+}
+
 def homepage_from_url(url):
     if not url:
         return ""
@@ -447,6 +511,28 @@ def root_domain(url):
     return f"{ext.domain}.{ext.suffix}" if ext.domain and ext.suffix else ""
 
 
+def is_blocked_job_url(url):
+    domain = root_domain(url).lower()
+    return any(domain == blocked or domain.endswith("." + blocked) for blocked in BLOCKED_JOB_DOMAINS)
+
+
+def company_tokens(company):
+    stop = {
+        "gmbh", "ag", "kg", "mbh", "co", "und", "der", "die", "das",
+        "gruppe", "group", "holding", "gesellschaft", "service", "services"
+    }
+    return [
+        token for token in normalize_company(company).split()
+        if len(token) >= 3 and token not in stop
+    ]
+
+
+def website_matches_company(url, company):
+    domain = root_domain(url).split(".")[0].replace("-", " ")
+    tokens = company_tokens(company)
+    return bool(tokens) and any(token in domain for token in tokens[:4])
+
+
 def extract_emails(text):
     return unique(re.findall(
         r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}",
@@ -456,75 +542,182 @@ def extract_emails(text):
 
 
 def choose_email(emails, domain):
+    bad = ("noreply@", "no-reply@", "datenschutz@", "privacy@")
+    emails = [e for e in emails if not e.lower().startswith(bad)]
     same = [e for e in emails if domain and e.lower().endswith("@" + domain.lower())]
     pool = same or emails
     if not pool:
         return ""
-    generic = ("info@", "kontakt@", "office@", "bewerbung@", "karriere@", "personal@")
-    personal = [e for e in pool if not e.lower().startswith(generic)]
-    return personal[0] if personal else pool[0]
+    preferred = (
+        "personal@", "karriere@", "bewerbung@", "recruiting@", "jobs@",
+        "info@", "kontakt@", "office@"
+    )
+    for prefix in preferred:
+        match = next((e for e in pool if e.lower().startswith(prefix)), "")
+        if match:
+            return match
+    return pool[0]
 
 
 def extract_phone(text):
     matches = re.findall(r"(?:\+49|0)[\d\s()/.\-]{7,}", text or "")
-    return clean_text(matches[0]) if matches else ""
+    for match in matches:
+        cleaned = clean_text(match).strip(" .-/")
+        digits = re.sub(r"\D", "", cleaned)
+        if 8 <= len(digits) <= 16:
+            return cleaned
+    return ""
 
 
 def find_person(text):
     text = clean_text(text)
+    role_words = (
+        r"Geschäftsführer(?:in)?|Inhaber(?:in)?|Personalleiter(?:in)?|"
+        r"Personalreferent(?:in)?|Recruiter(?:in)?|Recruiting|HR(?: Manager)?|"
+        r"Talent Acquisition|Praxisinhaber(?:in)?|Kanzleiinhaber(?:in)?"
+    )
     patterns = [
-        r"(?:Ansprechpartner(?:in)?|Kontakt)\s*:?\s*([A-ZÄÖÜ][a-zäöüß\-]+(?:\s+[A-ZÄÖÜ][a-zäöüß\-]+){1,2})",
-        r"([A-ZÄÖÜ][a-zäöüß\-]+(?:\s+[A-ZÄÖÜ][a-zäöüß\-]+){1,2})\s*(?:–|-|\|)\s*(Geschäftsführer(?:in)?|Inhaber(?:in)?|Partner(?:in)?|Personal|HR|Recruiting)",
+        rf"(?:Ansprechpartner(?:in)?|Kontakt(?:person)?)\s*:?\s*"
+        rf"([A-ZÄÖÜ][a-zäöüß\-]+(?:\s+[A-ZÄÖÜ][a-zäöüß\-]+){{1,2}})"
+        rf"(?:\s*[,|–-]\s*({role_words}))?",
+        rf"([A-ZÄÖÜ][a-zäöüß\-]+(?:\s+[A-ZÄÖÜ][a-zäöüß\-]+){{1,2}})"
+        rf"\s*(?:–|-|\||,)\s*({role_words})",
+        rf"({role_words})\s*:?\s*"
+        rf"([A-ZÄÖÜ][a-zäöüß\-]+(?:\s+[A-ZÄÖÜ][a-zäöüß\-]+){{1,2}})",
     ]
     for pattern in patterns:
-        match = re.search(pattern, text)
+        match = re.search(pattern, text, re.I)
         if match:
-            return match.group(1), match.group(2) if match.lastindex and match.lastindex > 1 else ""
+            groups = [g for g in match.groups() if g]
+            if groups:
+                if re.search(role_words, groups[0], re.I):
+                    return groups[1] if len(groups) > 1 else "", groups[0]
+                return groups[0], groups[1] if len(groups) > 1 else ""
     return "", ""
 
 
-def research_site(start_url):
+def discover_official_website(company, city="", serpapi_key=""):
+    """
+    Sucht die echte Firmenwebsite. SerpApi wird bevorzugt, danach DuckDuckGo.
+    Jobbörsen werden konsequent verworfen.
+    """
+    query = f'"{company}" {city} offizielle Website Kontakt'.strip()
+    candidates = []
+
+    if serpapi_key:
+        response = safe_get(
+            "https://serpapi.com/search.json",
+            params={"engine": "google", "q": query, "hl": "de", "gl": "de", "api_key": serpapi_key},
+            timeout=25,
+        )
+        if response:
+            try:
+                for item in response.json().get("organic_results", [])[:10]:
+                    link = item.get("link", "")
+                    if link:
+                        candidates.append(link)
+            except ValueError:
+                pass
+
+    if not candidates:
+        response = safe_get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": query},
+            timeout=20,
+        )
+        if response:
+            soup = BeautifulSoup(response.text, "html.parser")
+            for anchor in soup.select("a.result__a, a.result-link"):
+                href = anchor.get("href", "")
+                if href:
+                    candidates.append(href)
+
+    cleaned = []
+    for url in candidates:
+        if not url.startswith("http") or is_blocked_job_url(url):
+            continue
+        homepage = homepage_from_url(url)
+        if homepage and homepage not in cleaned:
+            cleaned.append(homepage)
+
+    # Erst exakte Domain-Nähe, danach erstes seriöses Ergebnis.
+    for url in cleaned:
+        if website_matches_company(url, company):
+            return url
+    return cleaned[0] if cleaned else ""
+
+
+def collect_internal_pages(homepage, html):
+    soup = BeautifulSoup(html, "html.parser")
+    wanted = ("kontakt", "impressum", "karriere", "jobs", "team", "uber-uns", "ueber-uns", "unternehmen")
+    pages = [homepage]
+    for anchor in soup.find_all("a", href=True):
+        href = urljoin(homepage, anchor["href"])
+        if root_domain(href) != root_domain(homepage):
+            continue
+        low = href.lower()
+        if any(term in low for term in wanted) and href not in pages:
+            pages.append(href)
+    # Fallbacks
+    for suffix in ("/kontakt", "/impressum", "/karriere", "/jobs", "/team", "/ueber-uns"):
+        url = urljoin(homepage, suffix)
+        if url not in pages:
+            pages.append(url)
+    return pages[:10]
+
+
+def research_site(company, city="", source_url="", serpapi_key=""):
     result = {
         "website": "", "contact_page": "", "email": "",
         "phone": "", "person": "", "role": "", "text": "",
     }
-    homepage = homepage_from_url(start_url)
+
+    # Ein Adzuna-/Jobbörsen-Link darf niemals als Firmenwebsite verwendet werden.
+    homepage = ""
+    if source_url and not is_blocked_job_url(source_url):
+        candidate = homepage_from_url(source_url)
+        if website_matches_company(candidate, company):
+            homepage = candidate
+
     if not homepage:
+        homepage = discover_official_website(company, city, serpapi_key)
+
+    if not homepage or is_blocked_job_url(homepage):
         return result
 
-    candidates = [
-        homepage,
-        urljoin(homepage, "/kontakt"),
-        urljoin(homepage, "/impressum"),
-        urljoin(homepage, "/karriere"),
-        urljoin(homepage, "/team"),
-        urljoin(homepage, "/ueber-uns"),
-    ]
+    first = safe_get(homepage, timeout=20)
+    if not first or "text/html" not in first.headers.get("content-type", ""):
+        return result
 
+    final_homepage = homepage_from_url(first.url)
+    if is_blocked_job_url(final_homepage):
+        return result
+
+    candidates = collect_internal_pages(final_homepage, first.text)
     all_text, all_emails = [], []
     phone = person = role = contact_page = ""
 
     for url in candidates:
-        response = safe_get(url)
+        response = first if url == homepage else safe_get(url, timeout=15)
         if not response or "text/html" not in response.headers.get("content-type", ""):
             continue
         soup = BeautifulSoup(response.text, "html.parser")
-        for tag in soup(["script", "style", "noscript"]):
+        for tag in soup(["script", "style", "noscript", "svg"]):
             tag.decompose()
-        text = clean_text(soup.get_text(" "))
-        all_text.append(text[:25000])
+        page_text = clean_text(soup.get_text(" "))
+        all_text.append(page_text[:30000])
         all_emails.extend(extract_emails(response.text))
-        all_emails.extend(extract_emails(text))
+        all_emails.extend(extract_emails(page_text))
         if not phone:
-            phone = extract_phone(text)
+            phone = extract_phone(page_text)
         if not person:
-            person, role = find_person(text)
-        if not contact_page and any(x in response.url.lower() for x in ("kontakt", "impressum", "karriere")):
+            person, role = find_person(page_text)
+        if not contact_page and any(x in response.url.lower() for x in ("kontakt", "impressum", "karriere", "jobs")):
             contact_page = response.url
 
-    domain = root_domain(homepage)
+    domain = root_domain(final_homepage)
     result.update({
-        "website": homepage,
+        "website": final_homepage,
         "contact_page": contact_page,
         "email": choose_email(unique(all_emails), domain),
         "phone": phone,
@@ -789,7 +982,7 @@ Berkant Devrim"""
     }
 
 
-def build_leads(parsed_jobs, exclusions, max_research):
+def build_leads(parsed_jobs, exclusions, max_research, serpapi_key=''):
     groups = defaultdict(list)
     for job in parsed_jobs:
         key = normalize_company(job["company"])
@@ -804,8 +997,14 @@ def build_leads(parsed_jobs, exclusions, max_research):
             continue
 
         start_url = next((j["external_url"] for j in jobs if j["external_url"]), "")
-        research = research_site(start_url) if idx < max_research else {
-            "website": homepage_from_url(start_url), "contact_page": "",
+        city = next((j["city"] for j in jobs if j["city"]), "")
+        research = research_site(
+            company=company,
+            city=city,
+            source_url=start_url,
+            serpapi_key=serpapi_key,
+        ) if idx < max_research else {
+            "website": "", "contact_page": "",
             "email": "", "phone": "", "person": "", "role": "", "text": "",
         }
 
@@ -846,6 +1045,7 @@ def build_leads(parsed_jobs, exclusions, max_research):
             "website": research.get("website", ""),
             "kontaktseite": research.get("contact_page", ""),
             "stellenlink": next((j["job_link"] for j in jobs if j["job_link"]), ""),
+            "crm_status": "Neu / nicht abgeglichen",
             **texts,
             "status": "Neu",
             "wiedervorlage": (date.today() + timedelta(days=1)).isoformat(),
@@ -895,7 +1095,7 @@ def upsert(existing, fresh):
 st.sidebar.title("XING Daily Leads")
 page = st.sidebar.radio(
     "Bereich",
-    ["Daily Leads", "Follow-ups", "Alle Leads", "CRM-Ausschluss"],
+    ["Daily Leads", "Follow-ups", "Alle Leads", "Salesforce-Abgleich", "CRM-Ausschluss"],
 )
 
 st.sidebar.caption(
@@ -1028,10 +1228,11 @@ if page == "Daily Leads":
             )
             progress.progress(0.75, text="Firmen werden gruppiert und recherchiert …")
 
-            fresh = build_leads(parsed, exclusions, int(max_research))
+            fresh = build_leads(parsed, exclusions, int(max_research), serpapi_key)
             merged, inserted, updated = upsert(df, fresh)
             storage.save(merged)
-            df = storage.load()
+            df = apply_crm_status(storage.load(), exclusions)
+            storage.save(df)
             progress.empty()
 
             st.success(
@@ -1056,7 +1257,10 @@ if page == "Daily Leads":
     if df.empty:
         st.info("Noch keine Leads vorhanden. Starte oben die erste Suche.")
     else:
-        new_df = df[df["status"].isin(["Neu", "Für morgen", "Mail vorbereitet"])].copy()
+        new_df = df[
+            df["status"].isin(["Neu", "Für morgen", "Mail vorbereitet"])
+            & (df["crm_status"] != "Bereits in Salesforce")
+        ].copy()
         new_df["lead_score"] = pd.to_numeric(new_df["lead_score"], errors="coerce").fillna(0)
         new_df = new_df.sort_values("lead_score", ascending=False)
 
@@ -1186,13 +1390,65 @@ elif page == "Alle Leads":
 
     st.dataframe(
         filtered[[
-            "hot_status", "lead_score", "firma", "offene_stellen",
-            "ansprechpartner", "email", "telefon", "status",
+            "hot_status", "lead_score", "firma", "crm_status",
+            "anzahl_stellen", "offene_stellen", "orte",
+            "ansprechpartner", "rolle", "email", "telefon",
+            "website", "kontaktseite", "status",
             "wiedervorlage", "zuletzt_gefunden",
         ]],
         use_container_width=True,
         hide_index=True,
+        column_config={
+            "website": st.column_config.LinkColumn("Website"),
+            "kontaktseite": st.column_config.LinkColumn("Kontaktseite"),
+            "lead_score": st.column_config.NumberColumn("Score", format="%d"),
+        },
     )
+    export_csv = filtered.reindex(columns=COLUMNS).to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "Gefilterte Tabelle als CSV herunterladen",
+        export_csv,
+        file_name=f"xing_sales_leads_{date.today().isoformat()}.csv",
+        mime="text/csv",
+    )
+
+elif page == "Salesforce-Abgleich":
+    st.title("Salesforce-Abgleich")
+    st.write(
+        "Lade einen Salesforce-Account-Export als CSV oder XLSX hoch. "
+        "Bereits vorhandene Firmen werden dauerhaft in die Ausschlussliste übernommen "
+        "und bei neuen Scans nicht mehr als neue Leads angelegt."
+    )
+    crm_file = st.file_uploader(
+        "Salesforce-Export hochladen",
+        type=["csv", "xlsx"],
+        key="salesforce_export",
+    )
+    if crm_file is not None:
+        try:
+            crm_companies, detected_column, row_count = read_company_file(crm_file)
+            matches = {
+                normalize_company(company)
+                for company in df.get("firma", [])
+                if normalize_company(company) in crm_companies
+            }
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Zeilen im Export", row_count)
+            c2.metric("Eindeutige Firmen", len(crm_companies))
+            c3.metric("Treffer in Leadliste", len(matches))
+            st.info(f"Erkannte Firmenspalte: {detected_column}")
+            if st.button("Salesforce-Firmen dauerhaft abgleichen"):
+                combined = set(exclusions) | crm_companies
+                storage.save_exclusions(combined)
+                df = apply_crm_status(df, combined)
+                storage.save(df)
+                st.success(
+                    f"{len(crm_companies)} Salesforce-Firmen gespeichert. "
+                    f"{len(matches)} vorhandene Leads wurden als Bestand erkannt."
+                )
+                st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
 
 elif page == "CRM-Ausschluss":
     st.title("CRM-Ausschluss")
