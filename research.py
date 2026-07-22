@@ -273,21 +273,29 @@ def _unwrap_search_url(url: str) -> str:
     return url
 
 
+def _candidate_record(url: str, context: str = "", phone: str = "", source: str = "") -> dict[str, str]:
+    return {
+        "url": _unwrap_search_url(url),
+        "context": clean_text(context),
+        "phone": clean_text(phone),
+        "source": source,
+    }
+
+
 def _search_candidates_serpapi(
     session: requests.Session,
     company: str,
     city: str,
     api_key: str,
     errors: list[str],
-) -> list[str]:
+) -> list[dict[str, str]]:
     if not api_key:
         return []
     queries = [
-        f'"{company}" {city} offizielle Website'.strip(),
-        f'"{company}" {city} Impressum'.strip(),
-        f'"{company}" {city} Karriere'.strip(),
+        f'"{company}" {city} offizielle Website Kontakt'.strip(),
+        f'"{company}" {city} Impressum Telefonnummer E Mail'.strip(),
     ]
-    urls: list[str] = []
+    candidates: list[dict[str, str]] = []
     for query in queries:
         response, error = _safe_get(
             session,
@@ -303,18 +311,48 @@ def _search_candidates_serpapi(
         except ValueError:
             errors.append("SerpApi: ungültige JSON Antwort")
             continue
-        for item in payload.get("organic_results", [])[:10]:
+
+        for item in payload.get("organic_results", [])[:12]:
             link = item.get("link", "")
             if link:
-                urls.append(link)
+                context = " ".join([
+                    str(item.get("title", "")),
+                    str(item.get("snippet", "")),
+                    str(item.get("displayed_link", "")),
+                ])
+                candidates.append(_candidate_record(link, context=context, source="SerpApi organic"))
+
         knowledge = payload.get("knowledge_graph") or {}
         if knowledge.get("website"):
-            urls.append(knowledge["website"])
-        for local in payload.get("local_results", {}).get("places", [])[:5]:
+            context = " ".join([
+                str(knowledge.get("title", "")),
+                str(knowledge.get("description", "")),
+                str(knowledge.get("address", "")),
+            ])
+            candidates.append(_candidate_record(
+                knowledge["website"],
+                context=context,
+                phone=str(knowledge.get("phone", "")),
+                source="SerpApi knowledge graph",
+            ))
+
+        local_results = payload.get("local_results") or {}
+        places = local_results.get("places", []) if isinstance(local_results, dict) else []
+        for local in places[:8]:
             if local.get("website"):
-                urls.append(local["website"])
+                context = " ".join([
+                    str(local.get("title", "")),
+                    str(local.get("address", "")),
+                    str(local.get("description", "")),
+                ])
+                candidates.append(_candidate_record(
+                    local["website"],
+                    context=context,
+                    phone=str(local.get("phone", "")),
+                    source="SerpApi local",
+                ))
         time.sleep(0.08)
-    return urls
+    return candidates
 
 
 def _search_candidates_duckduckgo(
@@ -322,11 +360,11 @@ def _search_candidates_duckduckgo(
     company: str,
     city: str,
     errors: list[str],
-) -> list[str]:
-    urls: list[str] = []
+) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
     for query in (
         f'"{company}" {city} offizielle Website'.strip(),
-        f'"{company}" {city} Impressum'.strip(),
+        f'"{company}" {city} Impressum Kontakt'.strip(),
     ):
         response, error = _safe_get(
             session,
@@ -338,13 +376,17 @@ def _search_candidates_duckduckgo(
             errors.append(f"DuckDuckGo: {error or 'keine Antwort'}")
             continue
         soup = BeautifulSoup(response.text, "html.parser")
-        for anchor in soup.select("a.result__a, a.result-link, .result__url"):
-            href = anchor.get("href", "")
-            href = _unwrap_search_url(href)
+        for result in soup.select(".result"):
+            anchor = result.select_one("a.result__a, a.result-link")
+            if not anchor:
+                continue
+            href = _unwrap_search_url(anchor.get("href", ""))
+            snippet = result.select_one(".result__snippet")
+            context = f"{anchor.get_text(' ')} {snippet.get_text(' ') if snippet else ''}"
             if href:
-                urls.append(href)
+                candidates.append(_candidate_record(href, context=context, source="DuckDuckGo"))
         time.sleep(0.08)
-    return urls
+    return candidates
 
 
 def _candidate_url_score(url: str, company: str, city: str = "") -> int:
@@ -359,7 +401,7 @@ def _candidate_url_score(url: str, company: str, city: str = "") -> int:
     compact_company = re.sub(r"\W+", "", company_norm)
     if compact_company and (compact_company in compact_domain or compact_domain in compact_company):
         score += 55
-    for token in tokens[:5]:
+    for token in tokens[:6]:
         if token in normalize(domain_base):
             score += 18
     if city and normalize(city).split(" ")[0] in normalize(url):
@@ -393,36 +435,52 @@ def discover_official_website(
     source_urls: Iterable[str] | None = None,
     serpapi_key: str = "",
     session: requests.Session | None = None,
-) -> tuple[str, list[str], list[str]]:
+) -> tuple[str, list[str], list[str], dict[str, list[str]]]:
     session = session or _session()
     errors: list[str] = []
-    candidates: list[str] = []
+    records: list[dict[str, str]] = []
 
     for source in source_urls or []:
         source = _unwrap_search_url(source)
         if source and not is_blocked_url(source):
-            candidates.append(homepage_from_url(source))
+            records.append(_candidate_record(homepage_from_url(source), context=company, source="Stellenlink"))
 
-    candidates.extend(_search_candidates_serpapi(session, company, city, serpapi_key, errors))
-    if len(candidates) < 3:
-        candidates.extend(_search_candidates_duckduckgo(session, company, city, errors))
+    records.extend(_search_candidates_serpapi(session, company, city, serpapi_key, errors))
+    if len(records) < 3:
+        records.extend(_search_candidates_duckduckgo(session, company, city, errors))
 
-    unique: list[str] = []
-    seen_domains: set[str] = set()
-    for raw in candidates:
-        raw = _unwrap_search_url(raw)
-        home = homepage_from_url(raw)
+    merged: dict[str, dict[str, str]] = {}
+    for record in records:
+        home = homepage_from_url(record.get("url", ""))
         domain = root_domain(home)
-        if not home or not domain or domain in seen_domains or is_blocked_url(home):
+        if not home or not domain or is_blocked_url(home):
             continue
-        seen_domains.add(domain)
-        unique.append(home)
+        if domain not in merged:
+            merged[domain] = {"url": home, "context": "", "phone": "", "source": ""}
+        merged[domain]["context"] = clean_text(
+            f"{merged[domain].get('context', '')} {record.get('context', '')}"
+        )
+        merged[domain]["phone"] = merged[domain].get("phone", "") or record.get("phone", "")
+        merged[domain]["source"] = clean_text(
+            f"{merged[domain].get('source', '')} {record.get('source', '')}"
+        )
 
-    ranked = sorted(unique, key=lambda item: _candidate_url_score(item, company, city), reverse=True)
+    unique = list(merged.values())
+    unique.sort(
+        key=lambda item: (
+            _candidate_url_score(item["url"], company, city)
+            + _page_company_score(item.get("context", ""), "", company, city)
+        ),
+        reverse=True,
+    )
+
     best_url = ""
     best_score = -999
-    for candidate in ranked[:12]:
+    best_record: dict[str, str] = {}
+    for record in unique[:15]:
+        candidate = record["url"]
         url_score = _candidate_url_score(candidate, company, city)
+        context_score = _page_company_score(record.get("context", ""), "", company, city)
         if url_score < 0:
             continue
         response, error = _safe_get(session, candidate, timeout=18)
@@ -437,16 +495,25 @@ def discover_official_website(
         for tag in soup(["script", "style", "noscript", "svg"]):
             tag.decompose()
         body_text = clean_text(soup.get_text(" "))
-        score = url_score + _page_company_score(body_text, title, company, city)
+        page_score = _page_company_score(body_text, title, company, city)
+        score = url_score + context_score + page_score
         if score > best_score:
             best_score = score
             best_url = final_home
-        if score >= 80:
+            best_record = record
+        if score >= 75:
             break
 
-    # Bei schwacher Übereinstimmung lieber leer als eine falsche Website.
-    return (best_url if best_score >= 28 else ""), ranked, errors
-
+    # Die bisherige Grenze war für kleine Praxen und Kanzleien zu streng.
+    # Eine Website wird nur übernommen, wenn mindestens ein echter Namensbezug
+    # in Domain, Suchkontext oder Seiteninhalt vorhanden ist.
+    accepted = best_url if best_score >= 20 else ""
+    hints = {"emails": [], "phones": []}
+    if accepted and best_record:
+        context = best_record.get("context", "")
+        hints["emails"] = extract_emails("", context)
+        hints["phones"] = extract_phones("", f"{best_record.get('phone', '')} {context}")
+    return accepted, [item["url"] for item in unique], errors, hints
 
 def _same_site(url: str, homepage: str) -> bool:
     return bool(root_domain(url)) and root_domain(url) == root_domain(homepage)
@@ -674,7 +741,7 @@ def research_company(
 ) -> dict[str, Any]:
     result = ResearchResult()
     session = _session()
-    website, candidates, errors = discover_official_website(
+    website, candidates, errors, search_hints = discover_official_website(
         company=company,
         city=city,
         source_urls=source_urls,
@@ -698,8 +765,8 @@ def research_company(
     result.website = website
     page_urls = collect_internal_pages(website, first.text, max_pages=max_pages)
 
-    all_emails: list[str] = []
-    all_phones: list[str] = []
+    all_emails: list[str] = list(search_hints.get("emails", []))
+    all_phones: list[str] = list(search_hints.get("phones", []))
     all_people: list[tuple[str, str, int]] = []
     all_texts: list[str] = []
     visited: set[str] = set()
