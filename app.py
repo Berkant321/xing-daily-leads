@@ -1,6 +1,6 @@
-
 import base64
 import hashlib
+import json
 import re
 import time
 import unicodedata
@@ -11,11 +11,15 @@ from urllib.parse import urljoin, urlparse
 import pandas as pd
 import requests
 import streamlit as st
-from openai import OpenAI
 import tldextract
 from bs4 import BeautifulSoup
 
 from scanner import scan_jobs
+
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
 
 try:
     import gspread
@@ -24,13 +28,6 @@ except Exception:
     gspread = None
     Credentials = None
 
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-def ai_test():
-    response = client.responses.create(
-        model="gpt-5-mini",
-        input="Antworte nur mit: KI funktioniert."
-    )
-    return response.output_text
 st.set_page_config(
     page_title="XING Daily Leads",
     page_icon="📞",
@@ -914,18 +911,20 @@ def score_lead(company, jobs, research, benefits):
 def greeting(person):
     if not person:
         return "Guten Tag,"
-    return f"Guten Tag Herr/Frau {person.split()[-1]},"
+    last_name = clean_text(person).split()[-1]
+    return f"Guten Tag Frau oder Herr {last_name},"
 
 
-def create_texts(company, jobs, benefits, person):
-    titles = unique([j["title"] for j in jobs])
-    title_short = titles[0] if titles else "Fachkräften"
-    title_list = ", ".join(titles[:2])
+def _fallback_texts(company, jobs, benefits, person):
+    titles = unique([j.get("title", "") for j in jobs if j.get("title")])
+    title_short = titles[0] if titles else "Ihrer Personalsuche"
+    title_list = ", ".join(titles[:2]) if titles else "Fachkräften"
 
     if benefits:
+        benefit_text = ", ".join(benefits[:3])
         opening = (
-            f"bei Ihrer aktuellen Personalsuche ist mir aufgefallen, dass Sie mit "
-            f"{', '.join(benefits[:3])} bereits einiges bieten."
+            f"bei Ihrer aktuellen Suche nach {title_list} ist mir aufgefallen, "
+            f"dass Sie mit {benefit_text} bereits gute Argumente für einen Wechsel bieten."
         )
     else:
         opening = f"ich bin auf Ihre aktuelle Suche nach {title_list} aufmerksam geworden."
@@ -934,11 +933,11 @@ def create_texts(company, jobs, benefits, person):
 
 {opening}
 
-Läuft die Besetzung aktuell so, wie Sie es sich vorgestellt haben?
+Erreichen Sie damit aktuell genügend passende Fachkräfte oder bleibt die Besetzung trotzdem schwierig?
 
-Ich möchte Ihnen an dieser Stelle nichts pauschal anbieten. Mich würde zunächst interessieren, welche Position aktuell am meisten drückt, was Sie bereits versuchen und wo es dabei noch hakt.
+Genau dazu würde ich Ihnen gerne kurz zeigen, welche zusätzliche Zielgruppe Sie über XING erreichen können.
 
-Falls das Thema relevant ist, reichen dafür 10 bis 15 Minuten.
+Passt ein kurzer Austausch von 10 Minuten?
 
 Viele Grüße
 
@@ -946,42 +945,41 @@ Berkant Devrim
 Account Executive | XING"""
 
     opener = (
-        f"Guten Tag, Berkant Devrim von XING. Ich komme direkt zum Punkt: "
-        f"Ich habe gesehen, dass Sie aktuell {title_list} suchen. "
-        "Läuft die Besetzung so, wie Sie es sich vorgestellt haben?"
+        f"Guten Tag, Berkant Devrim von XING. Ich habe gesehen, dass Sie aktuell "
+        f"{title_list} suchen. Erreichen Sie darüber bereits genügend passende Fachkräfte "
+        "oder ist die Besetzung weiterhin schwierig?"
     )
 
     questions = "\n".join([
-        "1. Welche Position drückt aktuell am meisten?",
-        "2. Seit wann suchen Sie bereits konkret?",
+        "1. Welche Position hat aktuell die höchste Priorität?",
+        "2. Seit wann ist die Stelle offen?",
         "3. Welche Kanäle nutzen Sie bisher?",
-        "4. Fehlt es eher an Bewerbungen oder an passender Qualität?",
-        "5. Was passiert intern, wenn die Stelle länger offen bleibt?",
-        "6. Bis wann müsste die Position idealerweise besetzt sein?",
+        "4. Wie viele passende Bewerbungen kommen darüber tatsächlich an?",
+        "5. Suchen Sie nur über Anzeigen oder sprechen Sie Kandidatinnen und Kandidaten auch direkt an?",
+        "6. Was kostet es Sie intern, wenn die Position länger offen bleibt?",
+        "7. Bis wann muss die Stelle idealerweise besetzt sein?",
     ])
 
-    follow1 = f"""Guten Tag,
+    follow1 = f"""{greeting(person)}
 
-ich wollte meine kurze Frage zur aktuellen Personalsuche bei {company} noch einmal aufgreifen.
+ich wollte meine kurze Frage zur Suche nach {title_list} noch einmal aufgreifen.
 
-Mich interessiert nicht, ob grundsätzlich Bewerbungen eingehen, sondern ob Sie die passenden Fachkräfte aktuell zuverlässig erreichen.
-
-Falls die Besetzung noch offen ist, können wir uns dazu gerne 10 Minuten austauschen.
+Erreichen Sie aktuell genügend passende Fachkräfte oder lohnt sich ein kurzer Blick auf zusätzliche Kandidatinnen und Kandidaten über XING?
 
 Viele Grüße
 Berkant Devrim"""
 
-    follow2 = f"""Guten Tag,
+    follow2 = f"""{greeting(person)}
 
-ich melde mich ein letztes Mal wegen Ihrer aktuellen Suche nach {title_list}.
+ich melde mich ein letztes Mal zu Ihrer aktuellen Personalsuche.
 
-Sollte das Thema inzwischen gelöst sein, hake ich es gerne ab. Falls die Position weiterhin offen ist, würde mich interessieren, woran die Besetzung momentan konkret scheitert.
+Ist die Position inzwischen besetzt, hake ich das Thema gerne ab. Falls nicht, können wir in 10 Minuten prüfen, ob XING für die gesuchten Profile sinnvoll ist.
 
 Viele Grüße
 Berkant Devrim"""
 
     return {
-        "erstmail_betreff": f"Kurze Frage zu Ihrer Suche nach {title_short}",
+        "erstmail_betreff": f"Kurze Frage zu {title_short}",
         "erstmail": mail,
         "call_opener": opener,
         "discovery_fragen": questions,
@@ -989,6 +987,88 @@ Berkant Devrim"""
         "follow_up_2": follow2,
     }
 
+
+def _extract_json_object(raw):
+    raw = clean_text(raw)
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.I)
+        raw = re.sub(r"\s*```$", "", raw)
+    match = re.search(r"\{.*\}", raw, flags=re.S)
+    if not match:
+        raise ValueError("Kein JSON Objekt in der KI Antwort gefunden.")
+    return json.loads(match.group(0))
+
+
+def create_texts(company, jobs, benefits, person, research=None):
+    fallback = _fallback_texts(company, jobs, benefits, person)
+    api_key = str(st.secrets.get("openai_api_key", "")).strip()
+
+    if OpenAI is None or not api_key:
+        return fallback
+
+    research = research or {}
+    titles = unique([j.get("title", "") for j in jobs if j.get("title")])
+    cities = unique([j.get("city", "") for j in jobs if j.get("city")])
+    descriptions = " ".join(
+        clean_text(j.get("description", ""))[:1800]
+        for j in jobs[:4]
+        if j.get("description")
+    )
+    website_text = clean_text(research.get("text", ""))[:3500]
+
+    prompt = f"""
+Du schreibst für einen XING Account Executive eine kurze, menschliche Kaltakquise.
+Nutze ausschließlich die gelieferten Fakten. Erfinde keine Preise, Rabatte, Reichweiten,
+Produktfunktionen, Benchmarks oder Ergebnisse. Verwende in Kundentexten keine Bindestriche.
+Kein Schleimen, kein Werbeton, keine künstliche Verknappung und keine pauschalen Behauptungen.
+
+Unternehmen: {company}
+Ansprechpartner: {person or "nicht bekannt"}
+Gesuchte Rollen: {", ".join(titles[:5]) or "nicht eindeutig"}
+Orte: {", ".join(cities[:5]) or "nicht eindeutig"}
+Erkannte Benefits: {", ".join(benefits[:8]) or "keine eindeutig erkannt"}
+Informationen aus den Stellenanzeigen: {descriptions or "keine"}
+Informationen von der Website: {website_text or "keine"}
+
+Erstelle genau ein valides JSON Objekt mit diesen Schlüsseln:
+erstmail_betreff
+erstmail
+call_opener
+discovery_fragen
+follow_up_1
+follow_up_2
+
+Vorgaben:
+Die Erstmail hat höchstens 110 Wörter.
+Der Betreff hat höchstens 7 Wörter.
+Die Mail nennt einen konkreten belegten Anlass und endet mit einer einfachen Frage.
+Der Call Opener ist höchstens 45 Wörter.
+Die Discovery Fragen folgen logisch dem Ablauf Recruiting Setup, Bedarf, bisherige Kanäle,
+Bewerbungsmenge, Qualität, Folgen offener Stellen, Zielzeitpunkt und Entscheidung.
+Follow Up 1 und Follow Up 2 haben jeweils höchstens 75 Wörter.
+Keine Anrede wie Frau oder Herr verwenden, wenn das Geschlecht nicht sicher bekannt ist.
+Keine Markdown Formatierung.
+"""
+
+    try:
+        client = OpenAI(api_key=api_key, timeout=30.0, max_retries=1)
+        response = client.responses.create(
+            model="gpt-5-mini",
+            input=prompt,
+        )
+        data = _extract_json_object(response.output_text)
+
+        required = [
+            "erstmail_betreff", "erstmail", "call_opener",
+            "discovery_fragen", "follow_up_1", "follow_up_2",
+        ]
+        result = {}
+        for key in required:
+            value = clean_text(data.get(key, ""))
+            result[key] = value or fallback[key]
+        return result
+    except Exception:
+        return fallback
 
 def build_leads(parsed_jobs, exclusions, max_research, serpapi_key=''):
     groups = defaultdict(list)
@@ -1021,7 +1101,7 @@ def build_leads(parsed_jobs, exclusions, max_research, serpapi_key=''):
             + detect_benefits(research.get("text", ""))
         )
         hot, score, reason = score_lead(company, jobs, research, benefits)
-        texts = create_texts(company, jobs, benefits, research.get("person", ""))
+        texts = create_texts(company, jobs, benefits, research.get("person", ""), research)
 
         family_summary = {}
         for job in jobs:
@@ -1472,6 +1552,3 @@ elif page == "CRM-Ausschluss":
     st.write(f"**Aktuell gespeichert:** {len(exclusions)} Firmen")
     if exclusions:
         st.dataframe(pd.DataFrame({"Firma normalisiert": sorted(exclusions)}), hide_index=True)
-
-if st.button("KI testen"):
-    st.success(ai_test())
