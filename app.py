@@ -569,8 +569,6 @@ def build_leads(
     ai_created = 0
     ai_fallback = 0
     cache_used = 0
-    research_failures: list[str] = []
-    ai_failures: list[str] = []
 
     for _is_new, _incomplete, _base_score, _key, jobs in candidates:
         company = clean_text(jobs[0].get("company", ""))
@@ -597,10 +595,6 @@ def build_leads(
             )
             if research.get("website"):
                 research_success += 1
-            else:
-                research_failures.append(
-                    f"{company}: {research.get('notes', 'keine Website gefunden')}"
-                )
         else:
             research = _cached_research(old) if old else {
                 "website": "",
@@ -662,7 +656,6 @@ def build_leads(
                 ai_created += 1
             else:
                 ai_fallback += 1
-                ai_failures.append(f"{company}: {texts.get('ai_status', 'Fallback ohne Status')}")
 
         family_summary: dict[str, int] = {}
         for job in jobs:
@@ -726,8 +719,6 @@ def build_leads(
         f"KI Texte erstellt: {ai_created}",
         f"Fallback Texte: {ai_fallback}",
     ]
-    diagnostics.extend(f"Recherchefehler: {item}" for item in research_failures[:10])
-    diagnostics.extend(f"KI Fehler: {item}" for item in ai_failures[:10])
     return _migrate_frame(pd.DataFrame(rows)), diagnostics
 
 
@@ -755,7 +746,7 @@ def upsert(existing: pd.DataFrame, fresh: pd.DataFrame, scan_id: str) -> tuple[p
                 for column in TEXT_COLUMNS:
                     item[column] = old.get(column, item.get(column, ""))
             item["first_seen"] = old.get("first_seen", "") or date.today().isoformat()
-            item["first_seen_scan"] = old.get("first_seen_scan", "") or old.get("scan_id", "") or "legacy"
+            item["first_seen_scan"] = old.get("first_seen_scan", "") or old.get("scan_id", "") or scan_id
             old_times = int(float(old.get("times_seen", 0) or 0))
             item["times_seen"] = str(old_times + (1 if old.get("scan_id") != scan_id else 0))
             existing_map[lid] = item
@@ -882,16 +873,6 @@ st.sidebar.write(f"Adzuna: {'bereit' if adzuna_app_id and adzuna_api_key else 'Z
 
 frame = storage.load()
 exclusions = storage.load_exclusions()
-
-# Einmalige Migration älterer Datensätze. Alte Leads dürfen beim ersten V3 Lauf
-# nicht fälschlich als neue Unternehmen des aktuellen Scans erscheinen.
-if not frame.empty:
-    legacy_mask = frame["first_seen_scan"].astype(str).str.strip().eq("")
-    if legacy_mask.any():
-        frame.loc[legacy_mask, "first_seen_scan"] = "legacy"
-        empty_scan_mask = legacy_mask & frame["scan_id"].astype(str).str.strip().eq("")
-        frame.loc[empty_scan_mask, "scan_id"] = "legacy"
-        storage.save(frame)
 
 
 if page == "Daily Leads":
@@ -1057,12 +1038,7 @@ if page == "Daily Leads":
     if frame.empty:
         st.info("Noch keine Leads vorhanden. Starte oben die erste Suche.")
     else:
-        # Nur echte Scan IDs berücksichtigen. Der Migrationswert "legacy" darf
-        # niemals als letzter Scan ausgewählt werden.
-        scan_ids = [
-            str(value) for value in frame["scan_id"].unique().tolist()
-            if re.fullmatch(r"\d{8}T\d{6}Z", str(value or ""))
-        ]
+        scan_ids = [value for value in frame["scan_id"].unique().tolist() if value]
         latest_scan = max(scan_ids) if scan_ids else ""
         latest_frame = frame[frame["scan_id"] == latest_scan].copy() if latest_scan else frame.copy()
         latest_frame = latest_frame[
@@ -1084,13 +1060,6 @@ if page == "Daily Leads":
             "KI Texte",
             int(latest_frame["ai_status"].str.startswith("KI erstellt", na=False).sum()),
         )
-
-        if not latest_frame.empty and not latest_frame["ai_status"].str.startswith("KI erstellt", na=False).any():
-            failures = unique(latest_frame["ai_status"].tolist())[:3]
-            st.error(
-                "Für diesen Lauf wurde kein einziger KI Text erstellt. "
-                "Die angezeigten Texte sind Fallbacks. Status: " + " | ".join(failures)
-            )
 
         view_mode = st.radio(
             "Ansicht",
