@@ -103,8 +103,13 @@ LARGE_COMPANY_WORDS = [
 
 AGENCY_WORDS = [
     "zeitarbeit", "personalvermittlung", "personaldienstleistung",
-    "arbeitnehmerüberlassung", "randstad", "adecco", "manpower",
-    "persona service", "tempton", "office people", "pluss personal",
+    "personaldienstleister", "arbeitnehmerüberlassung", "staffing",
+    "recruiting agency", "personalservice", "personal services",
+    "professionals gmbh", "experts gmbh", "workforce", "work4",
+    "randstad", "adecco", "manpower", "persona service", "tempton",
+    "office people", "pluss personal", "persona data", "avitea",
+    "piening", "meteor personaldienste", "actief personalmanagement",
+    "persona service", "expertum", "dis ag", "dpl professionals",
 ]
 
 BENEFIT_PATTERNS = {
@@ -534,42 +539,175 @@ def research_site(start_url):
 # SCORING + TEXTE
 # ============================================================
 
-def score_lead(jobs, research, benefits):
-    score, reasons = 0, []
+def _job_family(title):
+    """Ordnet Jobtitel grob einer Berufsgruppe zu."""
+    value = normalize_company(title)
+    families = {
+        "Steuer & Finanzen": [
+            "steuerfach", "bilanzbuch", "finanzbuch", "buchhalter",
+            "controller", "lohn", "tax",
+        ],
+        "Therapie": [
+            "physio", "ergotherapeut", "logop", "therapeut",
+        ],
+        "Pflege & Medizin": [
+            "pflege", "medizinische fachang", "arzt", "ärzt", "mfa",
+            "gesundheits", "kranken",
+        ],
+        "Elektro & Technik": [
+            "elektroniker", "elektriker", "mechatron", "servicetechn",
+            "sps", "automation",
+        ],
+        "Metall & Produktion": [
+            "schlosser", "schwei", "industriemechan", "zerspan",
+            "cnc", "monteur", "vorrichter", "metall",
+        ],
+        "Bau & Engineering": [
+            "bauleiter", "architekt", "ingenieur", "konstrukteur",
+            "projektleiter", "tiefbau", "hochbau",
+        ],
+        "IT": [
+            "software", "entwickler", "developer", "devops",
+            "systemadministrator", "it support", "informatik",
+        ],
+        "Vertrieb": [
+            "vertrieb", "sales", "account manager", "business development",
+        ],
+        "Logistik": [
+            "lager", "logistik", "stapler", "fahrer", "disponent",
+            "verlader", "berufskraft",
+        ],
+        "Verwaltung": [
+            "sachbearbeiter", "assistenz", "office", "personalreferent",
+            "kaufmann", "kauffrau",
+        ],
+    }
+    for family, keywords in families.items():
+        if any(keyword in value for keyword in keywords):
+            return family
+    return "Sonstige"
+
+
+def _agency_signal(company, jobs, research):
+    combined = normalize_company(
+        " ".join([
+            company,
+            research.get("website", ""),
+            research.get("text", "")[:15000],
+            " ".join(j.get("description", "")[:2500] for j in jobs),
+        ])
+    )
+    hits = [word for word in AGENCY_WORDS if normalize_company(word) in combined]
+    return len(hits) >= 1, hits[:3]
+
+
+def score_lead(company, jobs, research, benefits):
+    """
+    V3-Scoring: Nicht die reine Stellenmenge zählt, sondern Qualität,
+    Zielgruppen-Fokus, Kontaktierbarkeit und Direktkunden-Wahrscheinlichkeit.
+    """
+    score, reasons, penalties = 20, [], []
     count = len(jobs)
+    titles = unique([j.get("title", "") for j in jobs if j.get("title")])
+    families = [_job_family(title) for title in titles]
+    family_counts = {}
+    for family in families:
+        family_counts[family] = family_counts.get(family, 0) + 1
 
-    if count >= 3:
-        score += 32
+    dominant_family = max(family_counts, key=family_counts.get) if family_counts else "Sonstige"
+    dominant_share = (
+        family_counts.get(dominant_family, 0) / max(1, len(families))
+    )
+    family_diversity = len(set(families))
+
+    # Sinnvoller Recruiting-Druck: 2–8 Stellen sind für Direktkunden oft ideal.
+    if 2 <= count <= 5:
+        score += 22
+        reasons.append(f"{count} konkrete Stellen")
+    elif 6 <= count <= 10:
+        score += 18
         reasons.append(f"{count} offene Stellen")
-    elif count == 2:
-        score += 24
-        reasons.append("2 offene Stellen")
-    else:
-        score += 14
-        reasons.append("frische offene Stelle")
+    elif count == 1:
+        score += 10
+        reasons.append("frische Einzelstelle")
+    elif count > 10:
+        score += 8
+        penalties.append("sehr viele Ausschreibungen")
 
-    if research.get("email") or any(j["email"] for j in jobs):
-        score += 14
-        reasons.append("E-Mail vorhanden")
-    if research.get("person") or any(j["contact"] for j in jobs):
-        score += 14
+    # Ähnliche Profile sind wertvoller als ein komplett gemischtes Jobportfolio.
+    if len(titles) >= 2 and dominant_share >= 0.65:
+        score += 20
+        reasons.append(f"klarer Schwerpunkt: {dominant_family}")
+    elif family_diversity <= 2:
+        score += 12
+        reasons.append("zusammenhängende Zielprofile")
+    elif family_diversity >= 5:
+        score -= 22
+        penalties.append(f"{family_diversity} stark gemischte Berufsgruppen")
+
+    # Für XING besonders interessante Zielgruppen.
+    priority_bonus = {
+        "Therapie": 18,
+        "Steuer & Finanzen": 17,
+        "Pflege & Medizin": 15,
+        "Elektro & Technik": 13,
+        "Bau & Engineering": 12,
+        "IT": 12,
+        "Metall & Produktion": 9,
+        "Vertrieb": 8,
+        "Logistik": 5,
+        "Verwaltung": 4,
+        "Sonstige": 0,
+    }
+    bonus = priority_bonus.get(dominant_family, 0)
+    if bonus:
+        score += bonus
+        reasons.append(f"passende Zielgruppe: {dominant_family}")
+
+    email = research.get("email") or next(
+        (j.get("email", "") for j in jobs if j.get("email")), ""
+    )
+    person = research.get("person") or next(
+        (j.get("contact", "") for j in jobs if j.get("contact")), ""
+    )
+    phone = research.get("phone") or next(
+        (j.get("phone", "") for j in jobs if j.get("phone")), ""
+    )
+
+    if person:
+        score += 13
         reasons.append("Ansprechpartner vorhanden")
-    if research.get("phone") or any(j["phone"] for j in jobs):
+    if email:
+        score += 9
+        reasons.append("E-Mail vorhanden")
+    if phone:
         score += 8
         reasons.append("Telefon vorhanden")
+
     if len(benefits) >= 4:
-        score += 16
+        score += 12
         reasons.append("starke Benefits")
     elif len(benefits) >= 2:
-        score += 9
+        score += 7
         reasons.append("mehrere Benefits")
-    if len({j["title"] for j in jobs}) >= 2:
-        score += 8
-        reasons.append("mehrere Zielprofile")
 
-    score = min(score, 100)
-    status = "HOT" if score >= 65 else "WARM" if score >= 42 else "COLD"
-    return status, score, ", ".join(reasons)
+    is_agency, agency_hits = _agency_signal(company, jobs, research)
+    if is_agency:
+        score -= 55
+        penalties.append("wahrscheinlich Personaldienstleister")
+
+    # Extrem viele, völlig unterschiedliche Ausschreibungen sind ein starkes Warnsignal.
+    if count >= 20 and family_diversity >= 4:
+        score -= 25
+        penalties.append("Massenanzeigen aus vielen Bereichen")
+
+    score = max(0, min(int(score), 100))
+    status = "HOT" if score >= 75 else "WARM" if score >= 55 else "COLD"
+
+    explanation = reasons[:5]
+    if penalties:
+        explanation.extend(f"Abzug: {item}" for item in penalties[:3])
+    return status, score, ", ".join(explanation)
 
 
 def greeting(person):
@@ -675,8 +813,19 @@ def build_leads(parsed_jobs, exclusions, max_research):
             detect_benefits(" ".join(j["description"] for j in jobs))
             + detect_benefits(research.get("text", ""))
         )
-        hot, score, reason = score_lead(jobs, research, benefits)
+        hot, score, reason = score_lead(company, jobs, research, benefits)
         texts = create_texts(company, jobs, benefits, research.get("person", ""))
+
+        family_summary = {}
+        for job in jobs:
+            family = _job_family(job.get("title", ""))
+            family_summary[family] = family_summary.get(family, 0) + 1
+        grouped_jobs = ", ".join(
+            f"{amount}× {family}"
+            for family, amount in sorted(
+                family_summary.items(), key=lambda item: item[1], reverse=True
+            )[:4]
+        )
 
         row = {
             "lead_id": lead_id(company),
@@ -684,7 +833,7 @@ def build_leads(parsed_jobs, exclusions, max_research):
             "hot_status": hot,
             "lead_score": score,
             "warum_hot": reason,
-            "offene_stellen": " | ".join(unique([j["title"] for j in jobs])),
+            "offene_stellen": grouped_jobs or " | ".join(unique([j["title"] for j in jobs])[:5]),
             "anzahl_stellen": len(jobs),
             "orte": " | ".join(unique([j["city"] for j in jobs])),
             "veroeffentlicht_am": max([j["published"] for j in jobs if j["published"]] or [""]),
@@ -911,19 +1060,44 @@ if page == "Daily Leads":
         new_df["lead_score"] = pd.to_numeric(new_df["lead_score"], errors="coerce").fillna(0)
         new_df = new_df.sort_values("lead_score", ascending=False)
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Neue Leads", len(new_df))
-        c2.metric("HOT", int((new_df["hot_status"] == "HOT").sum()))
-        c3.metric("Mit E-Mail", int((new_df["email"] != "").sum()))
+        hot_count = int((new_df["lead_score"] >= 75).sum())
+        warm_count = int(((new_df["lead_score"] >= 55) & (new_df["lead_score"] < 75)).sum())
+        observe_count = int((new_df["lead_score"] < 55).sum())
+        contactable_count = int(
+            ((new_df["email"] != "") | (new_df["telefon"] != "")).sum()
+        )
 
-        for idx, row in new_df.iterrows():
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Heute anrufen", hot_count)
+        c2.metric("Diese Woche", warm_count)
+        c3.metric("Beobachten", observe_count)
+        c4.metric("Kontaktierbar", contactable_count)
+
+        view_mode = st.radio(
+            "Arbeitsmodus",
+            ["Heute wirklich anrufen", "HOT + WARM", "Alle neuen Leads"],
+            horizontal=True,
+        )
+        if view_mode == "Heute wirklich anrufen":
+            display_df = new_df[new_df["lead_score"] >= 75].head(30)
+        elif view_mode == "HOT + WARM":
+            display_df = new_df[new_df["lead_score"] >= 55].head(100)
+        else:
+            display_df = new_df.head(250)
+
+        st.caption(
+            f"{len(display_df)} Firmen werden angezeigt. "
+            "Personaldienstleister und stark gemischte Massenanzeigen erhalten deutliche Abzüge."
+        )
+
+        for idx, row in display_df.iterrows():
             with st.container(border=True):
                 top1, top2, top3 = st.columns([5, 2, 2])
                 top1.subheader(row["firma"])
                 top2.metric(row["hot_status"], int(float(row["lead_score"] or 0)))
                 top3.write(row["veroeffentlicht_am"] or "Datum offen")
 
-                st.write(f"**Stellen:** {row['offene_stellen']}")
+                st.write(f"**Stellenschwerpunkte:** {row['offene_stellen']}")
                 st.write(f"**Warum interessant:** {row['warum_hot']}")
                 if row["benefits"]:
                     st.write(f"**Benefits:** {row['benefits']}")
