@@ -122,7 +122,7 @@ def _fallback_assets(
 
     mail = f"""{salutation}
 
-{opening}
+bei {company} ist mir die aktuelle Suche nach {title_list} aufgefallen. {opening}
 
 {question}
 
@@ -134,7 +134,7 @@ Account Executive | XING"""
 
     opener = (
         f"Guten Tag, Berkant Devrim von XING. Ich komme direkt zum Punkt. "
-        f"Sie suchen aktuell {title_list}. Ich vermute, dass die Besetzung nicht vollständig planbar läuft, sonst wäre die Suche vermutlich nicht mehr offen. Liege ich damit falsch?"
+        f"Bei {company} suchen Sie aktuell {title_list}. Ich vermute, dass die Besetzung nicht vollständig planbar läuft, sonst wäre die Suche vermutlich nicht mehr offen. Liege ich damit falsch?"
     )
 
     discovery = "\n".join([
@@ -168,7 +168,7 @@ Account Executive | XING"""
 
     follow1 = f"""{salutation}
 
-ich greife meine Frage zu Ihrer Suche nach {title_list} noch einmal auf.
+ich greife meine Frage zur aktuellen Suche bei {company} nach {title_list} noch einmal auf.
 
 Kommen über Ihre bisherigen Kanäle genügend passende Bewerbungen an oder lohnt sich ein kurzer Blick auf eine zusätzliche Zielgruppe über XING?
 
@@ -177,7 +177,7 @@ Berkant Devrim"""
 
     follow2 = f"""{salutation}
 
-ist die Suche nach {title_one} inzwischen erfolgreich abgeschlossen, hake ich das Thema gerne ab.
+ist die Suche bei {company} nach {title_one} inzwischen erfolgreich abgeschlossen, hake ich das Thema gerne ab.
 
 Falls die Position noch offen ist, können wir in zehn Minuten prüfen, ob XING für das gesuchte Profil sinnvoll ist.
 
@@ -185,7 +185,7 @@ Viele Grüße
 Berkant Devrim"""
 
     result = {
-        "erstmail_betreff": f"Kurze Frage zu {title_one}"[:70],
+        "erstmail_betreff": f"{company}: {title_one}"[:70],
         "erstmail": mail,
         "call_opener": opener,
         "discovery_fragen": discovery,
