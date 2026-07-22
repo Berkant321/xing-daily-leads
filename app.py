@@ -1,25 +1,21 @@
-import base64
+from __future__ import annotations
+
 import hashlib
-import json
 import re
-import time
 import unicodedata
 from collections import defaultdict
-from datetime import date, datetime, timedelta
-from urllib.parse import urljoin, urlparse
+from datetime import date, datetime, timedelta, timezone
+from difflib import SequenceMatcher
+from typing import Any
 
 import pandas as pd
-import requests
 import streamlit as st
-import tldextract
 from bs4 import BeautifulSoup
 
+from research import normalize_company as research_normalize_company
+from research import research_company
+from sales_ai import ASSET_KEYS, create_sales_assets, openai_available
 from scanner import scan_jobs
-
-try:
-    from openai import OpenAI
-except Exception:
-    OpenAI = None
 
 try:
     import gspread
@@ -28,6 +24,7 @@ except Exception:
     gspread = None
     Credentials = None
 
+
 st.set_page_config(
     page_title="XING Daily Leads",
     page_icon="📞",
@@ -35,61 +32,36 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ============================================================
-# KONFIGURATION
-# ============================================================
-
-API_BASE = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service"
-API_HEADERS = {
-    "X-API-Key": "jobboerse-jobsuche",
-    "User-Agent": "Mozilla/5.0 (compatible; XING-Daily-Leads/1.0)",
-}
+# ---------------------------------------------------------------------------
+# Konfiguration
+# ---------------------------------------------------------------------------
 
 DEFAULT_SEARCH_TERMS = [
-    # Gesundheit & Therapie
     "Physiotherapeut",
     "Ergotherapeut",
     "Logopäde",
     "Pflegefachkraft",
     "Medizinische Fachangestellte",
-
-    # Handwerk & Technik
-    "Elektroniker",
-    "Mechatroniker",
-    "Anlagenmechaniker",
-    "Schweißer",
-    "Industriemechaniker",
-    "Servicetechniker",
-
-    # Bau & Engineering
-    "Bauleiter",
-    "Architekt",
-    "Projektingenieur",
-    "Elektroingenieur",
-    "Konstrukteur",
-
-    # IT
-    "Softwareentwickler",
-    "Systemadministrator",
-    "IT Support",
-    "DevOps Engineer",
-
-    # Vertrieb & kaufmännisch
-    "Vertriebsmitarbeiter",
-    "Account Manager",
-    "Sachbearbeiter",
-    "Buchhalter",
-    "Controller",
-
-    # Steuer & Recht
     "Steuerfachangestellte",
     "Steuerfachwirt",
     "Bilanzbuchhalter",
-
-    # Logistik
+    "Elektroniker",
+    "Mechatroniker",
+    "Anlagenmechaniker",
+    "Servicetechniker",
+    "Industriemechaniker",
+    "Schweißer",
+    "Bauleiter",
+    "Projektingenieur",
+    "Konstrukteur",
+    "Softwareentwickler",
+    "Systemadministrator",
+    "DevOps Engineer",
+    "Vertriebsmitarbeiter",
+    "Account Manager",
+    "Controller",
     "Berufskraftfahrer",
     "Disponent",
-    "Fachkraft Lagerlogistik",
 ]
 
 DEFAULT_REGIONS = [
@@ -99,34 +71,16 @@ DEFAULT_REGIONS = [
     ("Bielefeld", 100),
 ]
 
-LARGE_COMPANY_WORDS = [
-    "deutsche bahn", "db ", "siemens", "bosch", "amazon", "lidl",
-    "aldi", "rewe", "edeka", "thyssenkrupp", "telekom", "vodafone",
-    "bundeswehr", "universitätsklinikum", "uniklinik", "stadt ",
-    "landkreis", "ministerium", "sparkasse", "volksbank",
-]
-
-AGENCY_WORDS = [
-    "zeitarbeit", "personalvermittlung", "personaldienstleistung",
-    "personaldienstleister", "arbeitnehmerüberlassung", "staffing",
-    "recruiting agency", "personalservice", "personal services",
-    "professionals gmbh", "experts gmbh", "workforce", "work4",
-    "randstad", "adecco", "manpower", "persona service", "tempton",
-    "office people", "pluss personal", "persona data", "avitea",
-    "piening", "meteor personaldienste", "actief personalmanagement",
-    "persona service", "expertum", "dis ag", "dpl professionals",
-]
-
 BENEFIT_PATTERNS = {
     "Homeoffice": [r"\bhomeoffice\b", r"\bremote\b", r"mobiles arbeiten"],
     "Flexible Arbeitszeiten": [r"flexible arbeitszeit", r"gleitzeit"],
-    "4-Tage-Woche": [r"4[\s-]*tage[\s-]*woche", r"vier[\s-]*tage[\s-]*woche"],
-    "30+ Tage Urlaub": [r"\b3[0-9]\s*(tage|urlaubstage)"],
+    "4 Tage Woche": [r"4[\s-]*tage[\s-]*woche", r"vier[\s-]*tage[\s-]*woche"],
+    "30 oder mehr Tage Urlaub": [r"\b3[0-9]\s*(tage|urlaubstage)"],
     "JobRad": [r"\bjobrad\b", r"dienstfahrrad", r"bikeleasing"],
     "Jobticket": [r"\bjobticket\b", r"deutschlandticket"],
     "Weiterbildung": [r"weiterbildung", r"fortbildung"],
     "Betriebliche Altersvorsorge": [r"altersvorsorge", r"\bbav\b"],
-    "Bonus / Prämien": [r"\bbonus\b", r"prämie", r"sonderzahlung"],
+    "Bonus oder Prämien": [r"\bbonus\b", r"prämie", r"sonderzahlung"],
     "Keine Wochenendarbeit": [r"keine wochenend", r"montag bis freitag"],
     "Keine Überstunden": [r"keine überstunden", r"überstundenausgleich"],
     "Unbefristet": [r"unbefristet"],
@@ -134,92 +88,107 @@ BENEFIT_PATTERNS = {
     "Familiäres Team": [r"familiär", r"teamzusammenhalt"],
 }
 
+AGENCY_WORDS = [
+    "zeitarbeit", "personalvermittlung", "personaldienstleistung",
+    "personaldienstleister", "arbeitnehmerüberlassung", "staffing",
+    "recruiting agency", "personalservice", "randstad", "adecco",
+    "manpower", "persona service", "tempton", "office people",
+    "pluss personal", "avitea", "piening", "expertum", "actief",
+]
+
+LARGE_COMPANY_WORDS = [
+    "deutsche bahn", "db regio", "siemens", "bosch", "amazon", "lidl",
+    "aldi", "rewe group", "thyssenkrupp", "telekom", "vodafone",
+    "bundeswehr", "universitätsklinikum", "uniklinik", "ministerium",
+]
+
 STATUSES = [
     "Neu",
     "Mail vorbereitet",
-    "Follow-up fällig",
+    "Follow up fällig",
     "Für morgen",
     "In Salesforce übernommen",
     "Ausschließen",
 ]
 
 COLUMNS = [
-    "lead_id", "firma", "hot_status", "lead_score", "warum_hot",
-    "offene_stellen", "anzahl_stellen", "orte", "veroeffentlicht_am",
-    "zuletzt_gefunden", "benefits", "ansprechpartner", "rolle",
-    "email", "telefon", "website", "kontaktseite", "stellenlink",
-    "crm_status", "erstmail_betreff", "erstmail", "call_opener", "discovery_fragen",
-    "follow_up_1", "follow_up_2", "status", "wiedervorlage", "notiz",
+    "lead_id",
+    "firma",
+    "hot_status",
+    "lead_score",
+    "warum_hot",
+    "offene_stellen",
+    "anzahl_stellen",
+    "orte",
+    "veroeffentlicht_am",
+    "first_seen",
+    "first_seen_scan",
+    "zuletzt_gefunden",
+    "scan_id",
+    "times_seen",
+    "source_list",
+    "benefits",
+    "ansprechpartner",
+    "rolle",
+    "email",
+    "telefon",
+    "website",
+    "kontaktseite",
+    "impressum",
+    "karriereseite",
+    "stellenlink",
+    "research_status",
+    "research_notes",
+    "employee_hint",
+    "location_hint",
+    "content_hash",
+    "ai_status",
+    "text_locked",
+    "crm_status",
+    "erstmail_betreff",
+    "erstmail",
+    "call_opener",
+    "discovery_fragen",
+    "challenger_reframe",
+    "follow_up_1",
+    "follow_up_2",
+    "status",
+    "wiedervorlage",
+    "notiz",
 ]
 
-MANUAL_COLUMNS = ["status", "wiedervorlage", "notiz"]
+MANUAL_COLUMNS = ["status", "wiedervorlage", "notiz", "text_locked"]
+RESEARCH_COLUMNS = [
+    "ansprechpartner", "rolle", "email", "telefon", "website", "kontaktseite",
+    "impressum", "karriereseite", "research_status", "research_notes",
+    "employee_hint", "location_hint",
+]
+TEXT_COLUMNS = ASSET_KEYS + ["ai_status", "content_hash"]
 
 
-# ============================================================
-# DATENHILFEN
-# ============================================================
+# ---------------------------------------------------------------------------
+# Hilfen
+# ---------------------------------------------------------------------------
 
-def clean_text(value):
+def clean_text(value: Any) -> str:
     if value is None:
         return ""
     value = BeautifulSoup(str(value), "html.parser").get_text(" ")
     return re.sub(r"\s+", " ", value).strip()
 
 
-def normalize_company(name):
-    name = clean_text(name).lower()
-    name = unicodedata.normalize("NFKD", name)
-    name = "".join(c for c in name if not unicodedata.combining(c))
-    patterns = [
-        r"\bgmbh\s*&\s*co\.?\s*kg\b", r"\bgmbh\b", r"\bmbh\b",
-        r"\bag\b", r"\bkg\b", r"\bohg\b", r"\bpartg\s*mbb\b",
-        r"\bpartg\b", r"\be\.?\s*k\.?\b",
-        r"\bsteuerberatungsgesellschaft\b",
-    ]
-    for pattern in patterns:
-        name = re.sub(pattern, " ", name)
-    name = re.sub(r"[^a-z0-9]+", " ", name)
-    return re.sub(r"\s+", " ", name).strip()
+def normalize_company(name: str) -> str:
+    # Einheitliche Normalisierung für CRM, Scanner und Speicher.
+    return research_normalize_company(clean_text(name))
 
 
-def lead_id(company):
+def lead_id(company: str) -> str:
     return hashlib.sha1(normalize_company(company).encode("utf-8")).hexdigest()[:14]
 
 
-def safe_get(url, params=None, timeout=15):
-    try:
-        response = requests.get(
-            url,
-            params=params,
-            headers=API_HEADERS,
-            timeout=timeout,
-            allow_redirects=True,
-        )
-        response.raise_for_status()
-        return response
-    except requests.RequestException:
-        return None
-
-
-def first_value(data, keys):
-    for key in keys:
-        value = data.get(key)
-        if value not in (None, "", [], {}):
-            return value
-    return ""
-
-
-def nested(data, *keys):
-    current = data
-    for key in keys:
-        if not isinstance(current, dict):
-            return ""
-        current = current.get(key, "")
-    return current or ""
-
-
-def unique(values):
-    result, seen = [], set()
+def unique(values: list[Any]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
     for value in values:
         value = clean_text(value)
         if value and value.lower() not in seen:
@@ -228,15 +197,16 @@ def unique(values):
     return result
 
 
-def detect_benefits(text):
+def detect_benefits(text: str) -> list[str]:
     text = clean_text(text).lower()
     return [
-        benefit for benefit, patterns in BENEFIT_PATTERNS.items()
+        benefit
+        for benefit, patterns in BENEFIT_PATTERNS.items()
         if any(re.search(pattern, text, re.I) for pattern in patterns)
     ]
 
 
-def likely_large_or_agency(company):
+def likely_large_or_agency(company: str) -> str:
     low = f" {company.lower()} "
     if any(word in low for word in AGENCY_WORDS):
         return "Vermittler"
@@ -245,9 +215,87 @@ def likely_large_or_agency(company):
     return ""
 
 
-# ============================================================
-# SPEICHERUNG: GOOGLE SHEETS ODER LOKALER TESTMODUS
-# ============================================================
+def _job_family(title: str) -> str:
+    value = normalize_company(title)
+    families = {
+        "Steuer und Finanzen": ["steuerfach", "bilanzbuch", "finanzbuch", "buchhalter", "controller", "lohn", "tax"],
+        "Therapie": ["physio", "ergotherapeut", "logop", "therapeut"],
+        "Pflege und Medizin": ["pflege", "medizinische fachang", "arzt", "arztin", "mfa", "gesundheits", "kranken"],
+        "Elektro und Technik": ["elektroniker", "elektriker", "mechatron", "servicetechn", "sps", "automation"],
+        "Metall und Produktion": ["schlosser", "schwei", "industriemechan", "zerspan", "cnc", "monteur", "metall"],
+        "Bau und Engineering": ["bauleiter", "architekt", "ingenieur", "konstrukteur", "projektleiter", "tiefbau", "hochbau"],
+        "IT": ["software", "entwickler", "developer", "devops", "systemadministrator", "it support", "informatik"],
+        "Vertrieb": ["vertrieb", "sales", "account manager", "business development"],
+        "Logistik": ["lager", "logistik", "stapler", "fahrer", "disponent", "verlader", "berufskraft"],
+        "Verwaltung": ["sachbearbeiter", "assistenz", "office", "personalreferent", "kaufmann", "kauffrau"],
+    }
+    for family, keywords in families.items():
+        if any(keyword in value for keyword in keywords):
+            return family
+    return "Sonstige"
+
+
+def _split_pipe(value: str) -> list[str]:
+    return [clean_text(item) for item in str(value or "").split("|") if clean_text(item)]
+
+
+def _empty_row() -> dict[str, str]:
+    return {column: "" for column in COLUMNS}
+
+
+def _migrate_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    frame = frame.copy() if frame is not None else pd.DataFrame()
+    for column in COLUMNS:
+        if column not in frame.columns:
+            frame[column] = ""
+    frame = frame.reindex(columns=COLUMNS).fillna("")
+    return frame.astype(str)
+
+
+def _crm_match(company: str, exclusions: set[str]) -> bool:
+    normalized = normalize_company(company)
+    if not normalized:
+        return False
+    if normalized in exclusions:
+        return True
+    if len(normalized) < 8:
+        return False
+    for existing in exclusions:
+        if len(existing) < 8:
+            continue
+        if normalized in existing or existing in normalized:
+            if min(len(normalized), len(existing)) / max(len(normalized), len(existing)) >= 0.72:
+                return True
+        if SequenceMatcher(None, normalized, existing).ratio() >= 0.94:
+            return True
+    return False
+
+
+def _rotate_terms(terms: list[str], batch_size: int, scan_id: str) -> list[str]:
+    if batch_size <= 0 or batch_size >= len(terms):
+        return terms
+    seed = int(hashlib.sha1(scan_id.encode("utf-8")).hexdigest()[:8], 16)
+    start = seed % len(terms)
+    rotated = terms[start:] + terms[:start]
+    return rotated[:batch_size]
+
+
+def _facts_hash(company: str, jobs: list[dict], benefits: list[str], research: dict[str, Any]) -> str:
+    parts = [
+        company,
+        "|".join(unique([job.get("title", "") for job in jobs])),
+        "|".join(benefits),
+        clean_text(research.get("person", "")),
+        clean_text(research.get("role", "")),
+        clean_text(research.get("website", "")),
+        clean_text(research.get("text", ""))[:3000],
+    ]
+    return hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# Speicher
+# ---------------------------------------------------------------------------
 
 class Storage:
     def __init__(self):
@@ -267,59 +315,57 @@ class Storage:
                     ],
                 )
                 client = gspread.authorize(creds)
-                book = client.open(st.secrets["spreadsheet_name"])
-                self.ws = self._sheet(book, "Leads", 5000, 40)
-                self.exclusion_ws = self._sheet(book, "CRM_Ausschluss", 5000, 5)
+                book = client.open(str(st.secrets["spreadsheet_name"]))
+                self.ws = self._sheet(book, "Leads", 8000, max(60, len(COLUMNS) + 5))
+                self.exclusion_ws = self._sheet(book, "CRM_Ausschluss", 8000, 5)
                 self.mode = "google"
             except Exception as exc:
                 st.sidebar.warning(f"Google Sheets nicht verbunden: {exc}")
 
     @staticmethod
-    def _sheet(book, title, rows, cols):
-        names = [ws.title for ws in book.worksheets()]
+    def _sheet(book, title: str, rows: int, cols: int):
+        names = [worksheet.title for worksheet in book.worksheets()]
         if title in names:
             return book.worksheet(title)
         return book.add_worksheet(title=title, rows=rows, cols=cols)
 
-    def load(self):
+    def load(self) -> pd.DataFrame:
         if self.mode == "google":
             values = self.ws.get_all_records()
-            return pd.DataFrame(values, columns=COLUMNS) if values else pd.DataFrame(columns=COLUMNS)
+            return _migrate_frame(pd.DataFrame(values))
         try:
-            return pd.read_csv(self.local_path, dtype=str).fillna("")
+            return _migrate_frame(pd.read_csv(self.local_path, dtype=str).fillna(""))
         except FileNotFoundError:
-            return pd.DataFrame(columns=COLUMNS)
+            return _migrate_frame(pd.DataFrame())
 
-    def save(self, df):
-        df = df.reindex(columns=COLUMNS).fillna("")
+    def save(self, frame: pd.DataFrame) -> None:
+        frame = _migrate_frame(frame)
         if self.mode == "google":
             self.ws.clear()
-            self.ws.update([COLUMNS] + df.astype(str).values.tolist())
+            self.ws.update([COLUMNS] + frame.astype(str).values.tolist())
             self.ws.freeze(rows=1)
         else:
-            df.to_csv(self.local_path, index=False)
+            frame.to_csv(self.local_path, index=False)
 
-    def load_exclusions(self):
+    def load_exclusions(self) -> set[str]:
         if self.mode == "google":
             values = self.exclusion_ws.get_all_records()
-            if not values:
-                return set()
             return {
                 normalize_company(row.get("firma", ""))
                 for row in values
                 if row.get("firma")
             }
         try:
-            df = pd.read_csv(self.local_exclusion_path, dtype=str).fillna("")
-            return {normalize_company(v) for v in df.get("firma", [])}
+            frame = pd.read_csv(self.local_exclusion_path, dtype=str).fillna("")
+            return {normalize_company(value) for value in frame.get("firma", []) if value}
         except FileNotFoundError:
             return set()
 
-    def save_exclusions(self, companies):
-        rows = sorted({c for c in companies if c})
+    def save_exclusions(self, companies: set[str]) -> None:
+        rows = sorted({normalize_company(company) for company in companies if normalize_company(company)})
         if self.mode == "google":
             self.exclusion_ws.clear()
-            self.exclusion_ws.update([["firma"]] + [[c] for c in rows])
+            self.exclusion_ws.update([["firma"]] + [[company] for company in rows])
             self.exclusion_ws.freeze(rows=1)
         else:
             pd.DataFrame({"firma": rows}).to_csv(self.local_exclusion_path, index=False)
@@ -329,7 +375,6 @@ storage = Storage()
 
 
 def read_company_file(uploaded_file):
-    """Liest Salesforce-Exporte aus CSV oder XLSX und erkennt die Firmenspalte."""
     name = uploaded_file.name.lower()
     if name.endswith(".xlsx"):
         frame = pd.read_excel(uploaded_file, dtype=str).fillna("")
@@ -353,1137 +398,855 @@ def read_company_file(uploaded_file):
 
     aliases = [
         "account name", "account", "firmenname", "firma", "unternehmen",
-        "company", "name des accounts", "kunde", "kundenname"
+        "company", "name des accounts", "kunde", "kundenname",
     ]
-    normalized_columns = {normalize_company(col): col for col in frame.columns}
-    company_col = next(
-        (original for normalized, original in normalized_columns.items()
-         if any(alias in normalized for alias in aliases)),
+    normalized_columns = {normalize_company(column): column for column in frame.columns}
+    company_column = next(
+        (
+            original
+            for normalized, original in normalized_columns.items()
+            if any(alias in normalized for alias in aliases)
+        ),
         None,
     )
-    if not company_col:
-        raise ValueError(
-            "Keine Firmenspalte erkannt. Benenne sie z. B. 'Account Name', 'Firma' oder 'Unternehmen'."
-        )
+    if not company_column:
+        raise ValueError("Keine Firmenspalte erkannt. Nutze zum Beispiel Account Name, Firma oder Unternehmen.")
     companies = {
         normalize_company(value)
-        for value in frame[company_col].astype(str)
+        for value in frame[company_column].astype(str)
         if normalize_company(value)
     }
-    return companies, company_col, len(frame)
+    return companies, company_column, len(frame)
 
 
-def apply_crm_status(frame, exclusions):
-    if frame.empty:
-        return frame
-    frame = frame.copy()
-    normalized = frame["firma"].map(normalize_company)
-    frame["crm_status"] = normalized.map(
-        lambda value: "Bereits in Salesforce" if value in exclusions else "Neu"
+def apply_crm_status(frame: pd.DataFrame, exclusions: set[str]) -> pd.DataFrame:
+    frame = _migrate_frame(frame)
+    frame["crm_status"] = frame["firma"].map(
+        lambda company: "Bereits in Salesforce" if _crm_match(company, exclusions) else "Neu"
     )
     return frame
 
 
-# ============================================================
-# BA-JOBFINDER
-# ============================================================
+# ---------------------------------------------------------------------------
+# Scoring, Recherche und Texte
+# ---------------------------------------------------------------------------
 
-def fetch_search(term, city, radius, days, max_pages):
-    jobs = []
-    for page in range(1, max_pages + 1):
-        params = {
-            "angebotsart": 1,
-            "was": term,
-            "wo": city,
-            "umkreis": radius,
-            "page": page,
-            "size": 25,
-            "veroeffentlichtseit": days,
-            "zeitarbeit": "false",
-            "pav": "false",
-        }
-        response = safe_get(f"{API_BASE}/pc/v6/jobs", params=params)
-        if not response:
-            break
-        payload = response.json()
-        batch = payload.get("stellenangebote") or payload.get("jobs") or []
-        if not batch:
-            break
-        for item in batch:
-            item["_term"] = term
-            jobs.append(item)
-        if len(batch) < 25:
-            break
-        time.sleep(0.1)
-    return jobs
-
-
-def fetch_details(reference):
-    if not reference:
-        return {}
-    encoded = base64.b64encode(reference.encode("utf-8")).decode("utf-8")
-    response = safe_get(f"{API_BASE}/pc/v4/jobdetails/{encoded}")
-    return response.json() if response else {}
-
-
-def parse_job(raw):
-    reference = clean_text(first_value(raw, ["referenznummer", "refnr", "refNr"]))
-    details = fetch_details(reference)
-
-    company = clean_text(
-        first_value(raw, ["arbeitgeber", "arbeitgeberName", "firma"])
-        or first_value(details, ["arbeitgeber", "arbeitgeberName", "firmenname"])
-    )
-    title = clean_text(
-        first_value(raw, ["titel", "stellenangebotsTitel", "beruf"])
-        or first_value(details, ["stellenangebotsTitel", "titel"])
-    )
-    description = clean_text(
-        first_value(details, [
-            "stellenangebotsBeschreibung", "stellenbeschreibung", "beschreibung"
-        ])
-    )
-    city = clean_text(
-        nested(raw, "arbeitsort", "ort")
-        or nested(details, "arbeitsort", "ort")
-        or first_value(raw, ["arbeitsort", "ort"])
-    )
-    published = clean_text(
-        first_value(raw, [
-            "veroeffentlichungsdatum", "veroeffentlichtAm",
-            "modifikationsTimestamp",
-        ])
-    )[:10]
-    external_url = clean_text(
-        first_value(raw, ["externeUrl", "externeURL", "url"])
-        or first_value(details, ["externeUrl", "externeURL", "url"])
-    )
-    ba_link = (
-        f"https://www.arbeitsagentur.de/jobsuche/jobdetail/{reference}"
-        if reference else ""
-    )
-    email = clean_text(
-        first_value(details, ["email", "eMail", "kontaktEmail"])
-        or nested(details, "hauptkontakt", "email")
-    )
-    phone = clean_text(
-        first_value(details, ["telefon", "telefonnummer", "kontaktTelefon"])
-        or nested(details, "hauptkontakt", "telefon")
-    )
-    contact = clean_text(
-        first_value(details, ["ansprechpartner", "kontaktName"])
-        or nested(details, "hauptkontakt", "name")
-    )
-
+def _cached_research(row: dict[str, Any]) -> dict[str, Any]:
     return {
-        "reference": reference,
-        "company": company,
-        "title": title,
-        "description": description,
-        "city": city,
-        "published": published,
-        "external_url": external_url,
-        "job_link": external_url or ba_link,
-        "email": email,
-        "phone": phone,
-        "contact": contact,
-        "term": raw.get("_term", ""),
+        "website": row.get("website", ""),
+        "contact_page": row.get("kontaktseite", ""),
+        "imprint_page": row.get("impressum", ""),
+        "career_page": row.get("karriereseite", ""),
+        "email": row.get("email", ""),
+        "phone": row.get("telefon", ""),
+        "person": row.get("ansprechpartner", ""),
+        "role": row.get("rolle", ""),
+        "text": "",
+        "status": row.get("research_status", "Cache"),
+        "notes": row.get("research_notes", "Aus gespeichertem Lead übernommen."),
+        "employee_hint": row.get("employee_hint", ""),
+        "location_hint": row.get("location_hint", ""),
     }
 
 
-# ============================================================
-# WEBSITE-RECHERCHE
-# ============================================================
+def _research_complete(row: dict[str, Any]) -> bool:
+    return bool(row.get("website")) and bool(row.get("email") or row.get("telefon"))
 
 
-BLOCKED_JOB_DOMAINS = {
-    "adzuna.de", "adzuna.com", "indeed.com", "indeed.de", "stepstone.de",
-    "linkedin.com", "xing.com", "arbeitsagentur.de", "meinestadt.de",
-    "stellenanzeigen.de", "jobware.de", "kimeta.de", "jooble.org",
-    "glassdoor.de", "monster.de", "talent.com", "jobrapido.com",
-}
+def score_lead(
+    company: str,
+    jobs: list[dict],
+    research: dict[str, Any],
+    benefits: list[str],
+    previous_times_seen: int = 0,
+) -> tuple[str, int, str]:
+    base_scores = [int(job.get("lead_score", 0) or 0) for job in jobs]
+    score = max(base_scores or [20])
+    reasons: list[str] = []
+    penalties: list[str] = []
 
-def homepage_from_url(url):
-    if not url:
-        return ""
-    parsed = urlparse(url if "://" in url else "https://" + url)
-    return f"{parsed.scheme or 'https'}://{parsed.netloc}" if parsed.netloc else ""
+    scanner_reasons = unique([job.get("lead_reasons", "") for job in jobs if job.get("lead_reasons")])
+    if scanner_reasons:
+        reasons.extend(scanner_reasons[:2])
 
-
-def root_domain(url):
-    parsed = urlparse(url if "://" in url else "https://" + url)
-    ext = tldextract.extract(parsed.netloc)
-    return f"{ext.domain}.{ext.suffix}" if ext.domain and ext.suffix else ""
-
-
-def is_blocked_job_url(url):
-    domain = root_domain(url).lower()
-    return any(domain == blocked or domain.endswith("." + blocked) for blocked in BLOCKED_JOB_DOMAINS)
-
-
-def company_tokens(company):
-    stop = {
-        "gmbh", "ag", "kg", "mbh", "co", "und", "der", "die", "das",
-        "gruppe", "group", "holding", "gesellschaft", "service", "services"
-    }
-    return [
-        token for token in normalize_company(company).split()
-        if len(token) >= 3 and token not in stop
-    ]
-
-
-def website_matches_company(url, company):
-    domain = root_domain(url).split(".")[0].replace("-", " ")
-    tokens = company_tokens(company)
-    return bool(tokens) and any(token in domain for token in tokens[:4])
-
-
-def extract_emails(text):
-    return unique(re.findall(
-        r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}",
-        text or "",
-        re.I,
-    ))
-
-
-def choose_email(emails, domain):
-    bad = ("noreply@", "no-reply@", "datenschutz@", "privacy@")
-    emails = [e for e in emails if not e.lower().startswith(bad)]
-    same = [e for e in emails if domain and e.lower().endswith("@" + domain.lower())]
-    pool = same or emails
-    if not pool:
-        return ""
-    preferred = (
-        "personal@", "karriere@", "bewerbung@", "recruiting@", "jobs@",
-        "info@", "kontakt@", "office@"
-    )
-    for prefix in preferred:
-        match = next((e for e in pool if e.lower().startswith(prefix)), "")
-        if match:
-            return match
-    return pool[0]
-
-
-def extract_phone(text):
-    matches = re.findall(r"(?:\+49|0)[\d\s()/.\-]{7,}", text or "")
-    for match in matches:
-        cleaned = clean_text(match).strip(" .-/")
-        digits = re.sub(r"\D", "", cleaned)
-        if 8 <= len(digits) <= 16:
-            return cleaned
-    return ""
-
-
-def find_person(text):
-    text = clean_text(text)
-    role_words = (
-        r"Geschäftsführer(?:in)?|Inhaber(?:in)?|Personalleiter(?:in)?|"
-        r"Personalreferent(?:in)?|Recruiter(?:in)?|Recruiting|HR(?: Manager)?|"
-        r"Talent Acquisition|Praxisinhaber(?:in)?|Kanzleiinhaber(?:in)?"
-    )
-    patterns = [
-        rf"(?:Ansprechpartner(?:in)?|Kontakt(?:person)?)\s*:?\s*"
-        rf"([A-ZÄÖÜ][a-zäöüß\-]+(?:\s+[A-ZÄÖÜ][a-zäöüß\-]+){{1,2}})"
-        rf"(?:\s*[,|–-]\s*({role_words}))?",
-        rf"([A-ZÄÖÜ][a-zäöüß\-]+(?:\s+[A-ZÄÖÜ][a-zäöüß\-]+){{1,2}})"
-        rf"\s*(?:–|-|\||,)\s*({role_words})",
-        rf"({role_words})\s*:?\s*"
-        rf"([A-ZÄÖÜ][a-zäöüß\-]+(?:\s+[A-ZÄÖÜ][a-zäöüß\-]+){{1,2}})",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.I)
-        if match:
-            groups = [g for g in match.groups() if g]
-            if groups:
-                if re.search(role_words, groups[0], re.I):
-                    return groups[1] if len(groups) > 1 else "", groups[0]
-                return groups[0], groups[1] if len(groups) > 1 else ""
-    return "", ""
-
-
-def discover_official_website(company, city="", serpapi_key=""):
-    """
-    Sucht die echte Firmenwebsite. SerpApi wird bevorzugt, danach DuckDuckGo.
-    Jobbörsen werden konsequent verworfen.
-    """
-    query = f'"{company}" {city} offizielle Website Kontakt'.strip()
-    candidates = []
-
-    if serpapi_key:
-        response = safe_get(
-            "https://serpapi.com/search.json",
-            params={"engine": "google", "q": query, "hl": "de", "gl": "de", "api_key": serpapi_key},
-            timeout=25,
-        )
-        if response:
-            try:
-                for item in response.json().get("organic_results", [])[:10]:
-                    link = item.get("link", "")
-                    if link:
-                        candidates.append(link)
-            except ValueError:
-                pass
-
-    if not candidates:
-        response = safe_get(
-            "https://html.duckduckgo.com/html/",
-            params={"q": query},
-            timeout=20,
-        )
-        if response:
-            soup = BeautifulSoup(response.text, "html.parser")
-            for anchor in soup.select("a.result__a, a.result-link"):
-                href = anchor.get("href", "")
-                if href:
-                    candidates.append(href)
-
-    cleaned = []
-    for url in candidates:
-        if not url.startswith("http") or is_blocked_job_url(url):
-            continue
-        homepage = homepage_from_url(url)
-        if homepage and homepage not in cleaned:
-            cleaned.append(homepage)
-
-    # Erst exakte Domain-Nähe, danach erstes seriöses Ergebnis.
-    for url in cleaned:
-        if website_matches_company(url, company):
-            return url
-    return cleaned[0] if cleaned else ""
-
-
-def collect_internal_pages(homepage, html):
-    soup = BeautifulSoup(html, "html.parser")
-    wanted = ("kontakt", "impressum", "karriere", "jobs", "team", "uber-uns", "ueber-uns", "unternehmen")
-    pages = [homepage]
-    for anchor in soup.find_all("a", href=True):
-        href = urljoin(homepage, anchor["href"])
-        if root_domain(href) != root_domain(homepage):
-            continue
-        low = href.lower()
-        if any(term in low for term in wanted) and href not in pages:
-            pages.append(href)
-    # Fallbacks
-    for suffix in ("/kontakt", "/impressum", "/karriere", "/jobs", "/team", "/ueber-uns"):
-        url = urljoin(homepage, suffix)
-        if url not in pages:
-            pages.append(url)
-    return pages[:10]
-
-
-def research_site(company, city="", source_url="", serpapi_key=""):
-    result = {
-        "website": "", "contact_page": "", "email": "",
-        "phone": "", "person": "", "role": "", "text": "",
-    }
-
-    # Ein Adzuna-/Jobbörsen-Link darf niemals als Firmenwebsite verwendet werden.
-    homepage = ""
-    if source_url and not is_blocked_job_url(source_url):
-        candidate = homepage_from_url(source_url)
-        if website_matches_company(candidate, company):
-            homepage = candidate
-
-    if not homepage:
-        homepage = discover_official_website(company, city, serpapi_key)
-
-    if not homepage or is_blocked_job_url(homepage):
-        return result
-
-    first = safe_get(homepage, timeout=20)
-    if not first or "text/html" not in first.headers.get("content-type", ""):
-        return result
-
-    final_homepage = homepage_from_url(first.url)
-    if is_blocked_job_url(final_homepage):
-        return result
-
-    candidates = collect_internal_pages(final_homepage, first.text)
-    all_text, all_emails = [], []
-    phone = person = role = contact_page = ""
-
-    for url in candidates:
-        response = first if url == homepage else safe_get(url, timeout=15)
-        if not response or "text/html" not in response.headers.get("content-type", ""):
-            continue
-        soup = BeautifulSoup(response.text, "html.parser")
-        for tag in soup(["script", "style", "noscript", "svg"]):
-            tag.decompose()
-        page_text = clean_text(soup.get_text(" "))
-        all_text.append(page_text[:30000])
-        all_emails.extend(extract_emails(response.text))
-        all_emails.extend(extract_emails(page_text))
-        if not phone:
-            phone = extract_phone(page_text)
-        if not person:
-            person, role = find_person(page_text)
-        if not contact_page and any(x in response.url.lower() for x in ("kontakt", "impressum", "karriere", "jobs")):
-            contact_page = response.url
-
-    domain = root_domain(final_homepage)
-    result.update({
-        "website": final_homepage,
-        "contact_page": contact_page,
-        "email": choose_email(unique(all_emails), domain),
-        "phone": phone,
-        "person": person,
-        "role": role,
-        "text": " ".join(all_text),
-    })
-    return result
-
-
-# ============================================================
-# SCORING + TEXTE
-# ============================================================
-
-def _job_family(title):
-    """Ordnet Jobtitel grob einer Berufsgruppe zu."""
-    value = normalize_company(title)
-    families = {
-        "Steuer & Finanzen": [
-            "steuerfach", "bilanzbuch", "finanzbuch", "buchhalter",
-            "controller", "lohn", "tax",
-        ],
-        "Therapie": [
-            "physio", "ergotherapeut", "logop", "therapeut",
-        ],
-        "Pflege & Medizin": [
-            "pflege", "medizinische fachang", "arzt", "ärzt", "mfa",
-            "gesundheits", "kranken",
-        ],
-        "Elektro & Technik": [
-            "elektroniker", "elektriker", "mechatron", "servicetechn",
-            "sps", "automation",
-        ],
-        "Metall & Produktion": [
-            "schlosser", "schwei", "industriemechan", "zerspan",
-            "cnc", "monteur", "vorrichter", "metall",
-        ],
-        "Bau & Engineering": [
-            "bauleiter", "architekt", "ingenieur", "konstrukteur",
-            "projektleiter", "tiefbau", "hochbau",
-        ],
-        "IT": [
-            "software", "entwickler", "developer", "devops",
-            "systemadministrator", "it support", "informatik",
-        ],
-        "Vertrieb": [
-            "vertrieb", "sales", "account manager", "business development",
-        ],
-        "Logistik": [
-            "lager", "logistik", "stapler", "fahrer", "disponent",
-            "verlader", "berufskraft",
-        ],
-        "Verwaltung": [
-            "sachbearbeiter", "assistenz", "office", "personalreferent",
-            "kaufmann", "kauffrau",
-        ],
-    }
-    for family, keywords in families.items():
-        if any(keyword in value for keyword in keywords):
-            return family
-    return "Sonstige"
-
-
-def _agency_signal(company, jobs, research):
-    combined = normalize_company(
-        " ".join([
-            company,
-            research.get("website", ""),
-            research.get("text", "")[:15000],
-            " ".join(j.get("description", "")[:2500] for j in jobs),
-        ])
-    )
-    hits = [word for word in AGENCY_WORDS if normalize_company(word) in combined]
-    return len(hits) >= 1, hits[:3]
-
-
-def score_lead(company, jobs, research, benefits):
-    """
-    V3-Scoring: Nicht die reine Stellenmenge zählt, sondern Qualität,
-    Zielgruppen-Fokus, Kontaktierbarkeit und Direktkunden-Wahrscheinlichkeit.
-    """
-    score, reasons, penalties = 20, [], []
-    count = len(jobs)
-    titles = unique([j.get("title", "") for j in jobs if j.get("title")])
+    titles = unique([job.get("title", "") for job in jobs if job.get("title")])
     families = [_job_family(title) for title in titles]
-    family_counts = {}
+    family_counts: dict[str, int] = {}
     for family in families:
         family_counts[family] = family_counts.get(family, 0) + 1
-
     dominant_family = max(family_counts, key=family_counts.get) if family_counts else "Sonstige"
-    dominant_share = (
-        family_counts.get(dominant_family, 0) / max(1, len(families))
-    )
-    family_diversity = len(set(families))
+    dominant_share = family_counts.get(dominant_family, 0) / max(1, len(families))
 
-    # Sinnvoller Recruiting-Druck: 2–8 Stellen sind für Direktkunden oft ideal.
-    if 2 <= count <= 5:
-        score += 22
-        reasons.append(f"{count} konkrete Stellen")
-    elif 6 <= count <= 10:
-        score += 18
-        reasons.append(f"{count} offene Stellen")
-    elif count == 1:
-        score += 10
-        reasons.append("frische Einzelstelle")
-    elif count > 10:
+    if 2 <= len(jobs) <= 8:
         score += 8
+        reasons.append(f"{len(jobs)} konkrete Stellen")
+    elif len(jobs) > 15:
+        score -= 12
         penalties.append("sehr viele Ausschreibungen")
 
-    # Ähnliche Profile sind wertvoller als ein komplett gemischtes Jobportfolio.
     if len(titles) >= 2 and dominant_share >= 0.65:
-        score += 20
-        reasons.append(f"klarer Schwerpunkt: {dominant_family}")
-    elif family_diversity <= 2:
-        score += 12
-        reasons.append("zusammenhängende Zielprofile")
-    elif family_diversity >= 5:
-        score -= 22
-        penalties.append(f"{family_diversity} stark gemischte Berufsgruppen")
-
-    # Für XING besonders interessante Zielgruppen.
-    priority_bonus = {
-        "Therapie": 18,
-        "Steuer & Finanzen": 17,
-        "Pflege & Medizin": 15,
-        "Elektro & Technik": 13,
-        "Bau & Engineering": 12,
-        "IT": 12,
-        "Metall & Produktion": 9,
-        "Vertrieb": 8,
-        "Logistik": 5,
-        "Verwaltung": 4,
-        "Sonstige": 0,
-    }
-    bonus = priority_bonus.get(dominant_family, 0)
-    if bonus:
-        score += bonus
-        reasons.append(f"passende Zielgruppe: {dominant_family}")
-
-    email = research.get("email") or next(
-        (j.get("email", "") for j in jobs if j.get("email")), ""
-    )
-    person = research.get("person") or next(
-        (j.get("contact", "") for j in jobs if j.get("contact")), ""
-    )
-    phone = research.get("phone") or next(
-        (j.get("phone", "") for j in jobs if j.get("phone")), ""
-    )
-
-    if person:
-        score += 13
-        reasons.append("Ansprechpartner vorhanden")
-    if email:
         score += 9
-        reasons.append("E-Mail vorhanden")
-    if phone:
-        score += 8
-        reasons.append("Telefon vorhanden")
+        reasons.append(f"klarer Schwerpunkt: {dominant_family}")
 
+    if research.get("person"):
+        score += 8
+        reasons.append("Ansprechpartner gefunden")
+    if research.get("email"):
+        score += 7
+        reasons.append("E Mail gefunden")
+    if research.get("phone"):
+        score += 6
+        reasons.append("Telefon gefunden")
+    if research.get("website"):
+        score += 4
     if len(benefits) >= 4:
-        score += 12
+        score += 7
         reasons.append("starke Benefits")
     elif len(benefits) >= 2:
-        score += 7
+        score += 4
         reasons.append("mehrere Benefits")
+    if previous_times_seen >= 2:
+        score += min(7, previous_times_seen + 2)
+        reasons.append("wiederkehrender Personalbedarf")
+    if research.get("location_hint") and str(research.get("location_hint")).isdigit():
+        if int(research["location_hint"]) >= 2:
+            score += 4
+            reasons.append("mehrere Standorte")
 
-    is_agency, agency_hits = _agency_signal(company, jobs, research)
-    if is_agency:
+    classification = likely_large_or_agency(company)
+    if classification:
         score -= 55
-        penalties.append("wahrscheinlich Personaldienstleister")
-
-    # Extrem viele, völlig unterschiedliche Ausschreibungen sind ein starkes Warnsignal.
-    if count >= 20 and family_diversity >= 4:
-        score -= 25
-        penalties.append("Massenanzeigen aus vielen Bereichen")
+        penalties.append(classification)
 
     score = max(0, min(int(score), 100))
     status = "HOT" if score >= 75 else "WARM" if score >= 55 else "COLD"
-
-    explanation = reasons[:5]
-    if penalties:
-        explanation.extend(f"Abzug: {item}" for item in penalties[:3])
+    explanation = reasons[:6] + [f"Abzug: {item}" for item in penalties[:2]]
     return status, score, ", ".join(explanation)
 
 
-def greeting(person):
-    if not person:
-        return "Guten Tag,"
-    last_name = clean_text(person).split()[-1]
-    return f"Guten Tag Frau oder Herr {last_name},"
-
-
-def _fallback_texts(company, jobs, benefits, person):
-    titles = unique([j.get("title", "") for j in jobs if j.get("title")])
-    title_short = titles[0] if titles else "Ihrer Personalsuche"
-    title_list = ", ".join(titles[:2]) if titles else "Fachkräften"
-
-    if benefits:
-        benefit_text = ", ".join(benefits[:3])
-        opening = (
-            f"bei Ihrer aktuellen Suche nach {title_list} ist mir aufgefallen, "
-            f"dass Sie mit {benefit_text} bereits gute Argumente für einen Wechsel bieten."
-        )
-    else:
-        opening = f"ich bin auf Ihre aktuelle Suche nach {title_list} aufmerksam geworden."
-
-    mail = f"""{greeting(person)}
-
-{opening}
-
-Erreichen Sie damit aktuell genügend passende Fachkräfte oder bleibt die Besetzung trotzdem schwierig?
-
-Genau dazu würde ich Ihnen gerne kurz zeigen, welche zusätzliche Zielgruppe Sie über XING erreichen können.
-
-Passt ein kurzer Austausch von 10 Minuten?
-
-Viele Grüße
-
-Berkant Devrim
-Account Executive | XING"""
-
-    opener = (
-        f"Guten Tag, Berkant Devrim von XING. Ich habe gesehen, dass Sie aktuell "
-        f"{title_list} suchen. Erreichen Sie darüber bereits genügend passende Fachkräfte "
-        "oder ist die Besetzung weiterhin schwierig?"
-    )
-
-    questions = "\n".join([
-        "1. Welche Position hat aktuell die höchste Priorität?",
-        "2. Seit wann ist die Stelle offen?",
-        "3. Welche Kanäle nutzen Sie bisher?",
-        "4. Wie viele passende Bewerbungen kommen darüber tatsächlich an?",
-        "5. Suchen Sie nur über Anzeigen oder sprechen Sie Kandidatinnen und Kandidaten auch direkt an?",
-        "6. Was kostet es Sie intern, wenn die Position länger offen bleibt?",
-        "7. Bis wann muss die Stelle idealerweise besetzt sein?",
-    ])
-
-    follow1 = f"""{greeting(person)}
-
-ich wollte meine kurze Frage zur Suche nach {title_list} noch einmal aufgreifen.
-
-Erreichen Sie aktuell genügend passende Fachkräfte oder lohnt sich ein kurzer Blick auf zusätzliche Kandidatinnen und Kandidaten über XING?
-
-Viele Grüße
-Berkant Devrim"""
-
-    follow2 = f"""{greeting(person)}
-
-ich melde mich ein letztes Mal zu Ihrer aktuellen Personalsuche.
-
-Ist die Position inzwischen besetzt, hake ich das Thema gerne ab. Falls nicht, können wir in 10 Minuten prüfen, ob XING für die gesuchten Profile sinnvoll ist.
-
-Viele Grüße
-Berkant Devrim"""
-
-    return {
-        "erstmail_betreff": f"Kurze Frage zu {title_short}",
-        "erstmail": mail,
-        "call_opener": opener,
-        "discovery_fragen": questions,
-        "follow_up_1": follow1,
-        "follow_up_2": follow2,
-    }
-
-
-def _extract_json_object(raw):
-    raw = clean_text(raw)
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.I)
-        raw = re.sub(r"\s*```$", "", raw)
-    match = re.search(r"\{.*\}", raw, flags=re.S)
-    if not match:
-        raise ValueError("Kein JSON Objekt in der KI Antwort gefunden.")
-    return json.loads(match.group(0))
-
-
-def create_texts(company, jobs, benefits, person, research=None):
-    fallback = _fallback_texts(company, jobs, benefits, person)
-    api_key = str(st.secrets.get("openai_api_key", "")).strip()
-
-    if OpenAI is None or not api_key:
-        return fallback
-
-    research = research or {}
-    titles = unique([j.get("title", "") for j in jobs if j.get("title")])
-    cities = unique([j.get("city", "") for j in jobs if j.get("city")])
-    descriptions = " ".join(
-        clean_text(j.get("description", ""))[:1800]
-        for j in jobs[:4]
-        if j.get("description")
-    )
-    website_text = clean_text(research.get("text", ""))[:3500]
-
-    prompt = f"""
-Du schreibst für einen XING Account Executive eine kurze, menschliche Kaltakquise.
-Nutze ausschließlich die gelieferten Fakten. Erfinde keine Preise, Rabatte, Reichweiten,
-Produktfunktionen, Benchmarks oder Ergebnisse. Verwende in Kundentexten keine Bindestriche.
-Kein Schleimen, kein Werbeton, keine künstliche Verknappung und keine pauschalen Behauptungen.
-
-Unternehmen: {company}
-Ansprechpartner: {person or "nicht bekannt"}
-Gesuchte Rollen: {", ".join(titles[:5]) or "nicht eindeutig"}
-Orte: {", ".join(cities[:5]) or "nicht eindeutig"}
-Erkannte Benefits: {", ".join(benefits[:8]) or "keine eindeutig erkannt"}
-Informationen aus den Stellenanzeigen: {descriptions or "keine"}
-Informationen von der Website: {website_text or "keine"}
-
-Erstelle genau ein valides JSON Objekt mit diesen Schlüsseln:
-erstmail_betreff
-erstmail
-call_opener
-discovery_fragen
-follow_up_1
-follow_up_2
-
-Vorgaben:
-Die Erstmail hat höchstens 110 Wörter.
-Der Betreff hat höchstens 7 Wörter.
-Die Mail nennt einen konkreten belegten Anlass und endet mit einer einfachen Frage.
-Der Call Opener ist höchstens 45 Wörter.
-Die Discovery Fragen folgen logisch dem Ablauf Recruiting Setup, Bedarf, bisherige Kanäle,
-Bewerbungsmenge, Qualität, Folgen offener Stellen, Zielzeitpunkt und Entscheidung.
-Follow Up 1 und Follow Up 2 haben jeweils höchstens 75 Wörter.
-Keine Anrede wie Frau oder Herr verwenden, wenn das Geschlecht nicht sicher bekannt ist.
-Keine Markdown Formatierung.
-"""
-
-    try:
-        client = OpenAI(api_key=api_key, timeout=30.0, max_retries=1)
-        response = client.responses.create(
-            model="gpt-5-mini",
-            input=prompt,
-        )
-        data = _extract_json_object(response.output_text)
-
-        required = [
-            "erstmail_betreff", "erstmail", "call_opener",
-            "discovery_fragen", "follow_up_1", "follow_up_2",
-        ]
-        result = {}
-        for key in required:
-            value = clean_text(data.get(key, ""))
-            result[key] = value or fallback[key]
-        return result
-    except Exception:
-        return fallback
-
-def build_leads(parsed_jobs, exclusions, max_research, serpapi_key=''):
-    groups = defaultdict(list)
+def _group_jobs(parsed_jobs: list[dict], exclusions: set[str]) -> dict[str, list[dict]]:
+    groups: dict[str, list[dict]] = defaultdict(list)
     for job in parsed_jobs:
-        key = normalize_company(job["company"])
-        if key and key not in exclusions:
-            groups[key].append(job)
-
-    rows = []
-    for idx, jobs in enumerate(groups.values()):
-        company = jobs[0]["company"]
-        classification = likely_large_or_agency(company)
-        if classification:
+        company = clean_text(job.get("company", ""))
+        key = normalize_company(company)
+        if not key or _crm_match(company, exclusions):
             continue
+        groups[key].append(job)
+    return groups
 
-        start_url = next((j["external_url"] for j in jobs if j["external_url"]), "")
-        city = next((j["city"] for j in jobs if j["city"]), "")
-        research = research_site(
-            company=company,
-            city=city,
-            source_url=start_url,
-            serpapi_key=serpapi_key,
-        ) if idx < max_research else {
-            "website": "", "contact_page": "",
-            "email": "", "phone": "", "person": "", "role": "", "text": "",
-        }
+
+def build_leads(
+    *,
+    parsed_jobs: list[dict],
+    exclusions: set[str],
+    max_research: int,
+    serpapi_key: str,
+    existing: pd.DataFrame,
+    openai_api_key: str,
+    openai_model: str,
+    scan_id: str,
+) -> tuple[pd.DataFrame, list[str]]:
+    groups = _group_jobs(parsed_jobs, exclusions)
+    existing = _migrate_frame(existing)
+    existing_map = {row["lead_id"]: row.to_dict() for _, row in existing.iterrows()}
+
+    candidates: list[tuple[int, int, int, str, list[dict]]] = []
+    for key, jobs in groups.items():
+        company = clean_text(jobs[0].get("company", ""))
+        if likely_large_or_agency(company):
+            continue
+        lid = lead_id(company)
+        old = existing_map.get(lid, {})
+        is_new = 1 if not old else 0
+        incomplete = 1 if not old or not _research_complete(old) else 0
+        base_score = max([int(job.get("lead_score", 0) or 0) for job in jobs] or [0])
+        candidates.append((is_new, incomplete, base_score, key, jobs))
+
+    candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    rows: list[dict[str, Any]] = []
+    research_count = 0
+    research_success = 0
+    ai_created = 0
+    ai_fallback = 0
+    cache_used = 0
+
+    for _is_new, _incomplete, _base_score, _key, jobs in candidates:
+        company = clean_text(jobs[0].get("company", ""))
+        lid = lead_id(company)
+        old = existing_map.get(lid, {})
+        city = next((clean_text(job.get("city", "")) for job in jobs if job.get("city")), "")
+        source_urls = unique([
+            job.get("external_url", "") or job.get("job_link", "")
+            for job in jobs
+            if job.get("external_url") or job.get("job_link")
+        ])
+
+        if old and _research_complete(old):
+            research = _cached_research(old)
+            cache_used += 1
+        elif research_count < max_research:
+            research_count += 1
+            research = research_company(
+                company=company,
+                city=city,
+                source_urls=source_urls,
+                serpapi_key=serpapi_key,
+                max_pages=12,
+            )
+            if research.get("website"):
+                research_success += 1
+        else:
+            research = _cached_research(old) if old else {
+                "website": "",
+                "contact_page": "",
+                "imprint_page": "",
+                "career_page": "",
+                "email": "",
+                "phone": "",
+                "person": "",
+                "role": "",
+                "text": "",
+                "status": "nicht recherchiert",
+                "notes": "Recherchelimit dieses Laufs erreicht.",
+                "employee_hint": "",
+                "location_hint": "",
+            }
+
+        direct_email = next((clean_text(job.get("email", "")) for job in jobs if job.get("email")), "")
+        direct_phone = next((clean_text(job.get("phone", "")) for job in jobs if job.get("phone")), "")
+        direct_person = next((clean_text(job.get("contact", "")) for job in jobs if job.get("contact")), "")
+        research["email"] = research.get("email") or direct_email
+        research["phone"] = research.get("phone") or direct_phone
+        research["person"] = research.get("person") or direct_person
 
         benefits = unique(
-            detect_benefits(" ".join(j["description"] for j in jobs))
+            detect_benefits(" ".join(clean_text(job.get("description", "")) for job in jobs))
             + detect_benefits(research.get("text", ""))
         )
-        hot, score, reason = score_lead(company, jobs, research, benefits)
-        texts = create_texts(company, jobs, benefits, research.get("person", ""), research)
 
-        family_summary = {}
+        old_times_seen = int(float(old.get("times_seen", 0) or 0)) if old else 0
+        hot_status, score, reason = score_lead(
+            company,
+            jobs,
+            research,
+            benefits,
+            previous_times_seen=old_times_seen,
+        )
+
+        content_hash = _facts_hash(company, jobs, benefits, research)
+        should_keep_text = bool(old and old.get("text_locked") == "ja")
+        same_facts = bool(old and old.get("content_hash") == content_hash)
+        old_ai_ok = bool(old and str(old.get("ai_status", "")).startswith("KI erstellt"))
+
+        if should_keep_text or (same_facts and old_ai_ok):
+            texts = {key: old.get(key, "") for key in ASSET_KEYS}
+            texts["ai_status"] = old.get("ai_status", "")
+            cache_used += 1
+        else:
+            texts = create_sales_assets(
+                company=company,
+                jobs=jobs,
+                benefits=benefits,
+                person=research.get("person", ""),
+                research=research,
+                api_key=openai_api_key,
+                model=openai_model,
+            )
+            if texts.get("ai_status", "").startswith("KI erstellt"):
+                ai_created += 1
+            else:
+                ai_fallback += 1
+
+        family_summary: dict[str, int] = {}
         for job in jobs:
             family = _job_family(job.get("title", ""))
             family_summary[family] = family_summary.get(family, 0) + 1
         grouped_jobs = ", ".join(
             f"{amount}× {family}"
-            for family, amount in sorted(
-                family_summary.items(), key=lambda item: item[1], reverse=True
-            )[:4]
+            for family, amount in sorted(family_summary.items(), key=lambda item: item[1], reverse=True)[:4]
         )
 
-        row = {
-            "lead_id": lead_id(company),
+        row = _empty_row()
+        row.update({
+            "lead_id": lid,
             "firma": company,
-            "hot_status": hot,
-            "lead_score": score,
+            "hot_status": hot_status,
+            "lead_score": str(score),
             "warum_hot": reason,
-            "offene_stellen": grouped_jobs or " | ".join(unique([j["title"] for j in jobs])[:5]),
-            "anzahl_stellen": len(jobs),
-            "orte": " | ".join(unique([j["city"] for j in jobs])),
-            "veroeffentlicht_am": max([j["published"] for j in jobs if j["published"]] or [""]),
+            "offene_stellen": grouped_jobs or " | ".join(unique([job.get("title", "") for job in jobs])[:6]),
+            "anzahl_stellen": str(len(jobs)),
+            "orte": " | ".join(unique([job.get("city", "") for job in jobs])),
+            "veroeffentlicht_am": max([job.get("published", "") for job in jobs if job.get("published")] or [""]),
             "zuletzt_gefunden": date.today().isoformat(),
+            "scan_id": scan_id,
+            "source_list": " | ".join(unique([
+                source.strip()
+                for job in jobs
+                for source in str(job.get("source", "")).split("|")
+                if source.strip()
+            ])),
             "benefits": " | ".join(benefits),
-            "ansprechpartner": research.get("person") or next((j["contact"] for j in jobs if j["contact"]), ""),
-            "rolle": research.get("role", ""),
-            "email": research.get("email") or next((j["email"] for j in jobs if j["email"]), ""),
-            "telefon": research.get("phone") or next((j["phone"] for j in jobs if j["phone"]), ""),
-            "website": research.get("website", ""),
-            "kontaktseite": research.get("contact_page", ""),
-            "stellenlink": next((j["job_link"] for j in jobs if j["job_link"]), ""),
+            "ansprechpartner": clean_text(research.get("person", "")),
+            "rolle": clean_text(research.get("role", "")),
+            "email": clean_text(research.get("email", "")),
+            "telefon": clean_text(research.get("phone", "")),
+            "website": clean_text(research.get("website", "")),
+            "kontaktseite": clean_text(research.get("contact_page", "")),
+            "impressum": clean_text(research.get("imprint_page", "")),
+            "karriereseite": clean_text(research.get("career_page", "")),
+            "stellenlink": next((clean_text(job.get("job_link", "")) for job in jobs if job.get("job_link")), ""),
+            "research_status": clean_text(research.get("status", "")),
+            "research_notes": clean_text(research.get("notes", "")),
+            "employee_hint": clean_text(research.get("employee_hint", "")),
+            "location_hint": clean_text(research.get("location_hint", "")),
+            "content_hash": content_hash,
+            "ai_status": texts.get("ai_status", ""),
+            "text_locked": old.get("text_locked", "") if old else "",
             "crm_status": "Neu / nicht abgeglichen",
-            **texts,
-            "status": "Neu",
-            "wiedervorlage": (date.today() + timedelta(days=1)).isoformat(),
-            "notiz": "",
-        }
+            "status": old.get("status", "Neu") if old else "Neu",
+            "wiedervorlage": old.get("wiedervorlage", "") if old else (date.today() + timedelta(days=1)).isoformat(),
+            "notiz": old.get("notiz", "") if old else "",
+        })
+        for key in ASSET_KEYS:
+            row[key] = texts.get(key, "")
         rows.append(row)
 
-    return pd.DataFrame(rows, columns=COLUMNS)
+    diagnostics = [
+        f"Firmen gruppiert: {len(groups)}",
+        f"Websites recherchiert: {research_count}",
+        f"Passende Websites gefunden: {research_success}",
+        f"Gespeicherte Recherche oder Texte wiederverwendet: {cache_used}",
+        f"KI Texte erstellt: {ai_created}",
+        f"Fallback Texte: {ai_fallback}",
+    ]
+    return _migrate_frame(pd.DataFrame(rows)), diagnostics
 
 
-def upsert(existing, fresh):
-    if existing.empty:
-        return fresh.copy(), len(fresh), 0
-
-    existing = existing.reindex(columns=COLUMNS).fillna("")
-    fresh = fresh.reindex(columns=COLUMNS).fillna("")
+def upsert(existing: pd.DataFrame, fresh: pd.DataFrame, scan_id: str) -> tuple[pd.DataFrame, int, int]:
+    existing = _migrate_frame(existing)
+    fresh = _migrate_frame(fresh)
     existing_map = {row["lead_id"]: row.to_dict() for _, row in existing.iterrows()}
-
     inserted = updated = 0
-    for _, row in fresh.iterrows():
-        item = row.to_dict()
+
+    for _, fresh_row in fresh.iterrows():
+        item = fresh_row.to_dict()
         lid = item["lead_id"]
-        if lid in existing_map:
-            old = existing_map[lid]
-            for col in MANUAL_COLUMNS:
-                if old.get(col, ""):
-                    item[col] = old[col]
+        old = existing_map.get(lid)
+        if old:
+            for column in MANUAL_COLUMNS:
+                if old.get(column, ""):
+                    item[column] = old[column]
+            if old.get("text_locked") == "ja":
+                for column in TEXT_COLUMNS:
+                    item[column] = old.get(column, item.get(column, ""))
+            for column in RESEARCH_COLUMNS:
+                if not item.get(column, "") and old.get(column, ""):
+                    item[column] = old[column]
+            if item.get("ai_status", "").startswith("Fallback") and old.get("ai_status", "").startswith("KI erstellt"):
+                for column in TEXT_COLUMNS:
+                    item[column] = old.get(column, item.get(column, ""))
+            item["first_seen"] = old.get("first_seen", "") or date.today().isoformat()
+            item["first_seen_scan"] = old.get("first_seen_scan", "") or old.get("scan_id", "") or scan_id
+            old_times = int(float(old.get("times_seen", 0) or 0))
+            item["times_seen"] = str(old_times + (1 if old.get("scan_id") != scan_id else 0))
             existing_map[lid] = item
             updated += 1
         else:
+            item["first_seen"] = date.today().isoformat()
+            item["first_seen_scan"] = scan_id
+            item["times_seen"] = "1"
             existing_map[lid] = item
             inserted += 1
 
-    merged = pd.DataFrame(existing_map.values(), columns=COLUMNS)
+    merged = _migrate_frame(pd.DataFrame(existing_map.values()))
     merged["lead_score_num"] = pd.to_numeric(merged["lead_score"], errors="coerce").fillna(0)
-    merged = merged.sort_values(
-        ["lead_score_num", "firma"],
-        ascending=[False, True],
-    ).drop(columns=["lead_score_num"])
-    return merged, inserted, updated
+    merged = merged.sort_values(["lead_score_num", "firma"], ascending=[False, True]).drop(columns=["lead_score_num"])
+    return _migrate_frame(merged), inserted, updated
 
 
-# ============================================================
-# UI
-# ============================================================
+def enrich_existing_leads(
+    frame: pd.DataFrame,
+    *,
+    limit: int,
+    serpapi_key: str,
+    openai_api_key: str,
+    openai_model: str,
+) -> tuple[pd.DataFrame, list[str]]:
+    frame = _migrate_frame(frame)
+    candidates = frame[
+        (frame["website"] == "")
+        | ((frame["email"] == "") & (frame["telefon"] == ""))
+        | (frame["ai_status"].str.startswith("Fallback", na=False))
+    ].copy()
+    candidates["score_num"] = pd.to_numeric(candidates["lead_score"], errors="coerce").fillna(0)
+    candidates = candidates.sort_values("score_num", ascending=False).head(limit)
+
+    researched = websites = contacts = ai_count = 0
+    for idx, row in candidates.iterrows():
+        city = _split_pipe(row["orte"])[0] if _split_pipe(row["orte"]) else ""
+        research = research_company(
+            company=row["firma"],
+            city=city,
+            source_urls=[row["website"], row["stellenlink"], row["karriereseite"]],
+            serpapi_key=serpapi_key,
+            max_pages=12,
+        )
+        researched += 1
+        if research.get("website"):
+            websites += 1
+        if research.get("email") or research.get("phone"):
+            contacts += 1
+
+        mapping = {
+            "website": "website",
+            "contact_page": "kontaktseite",
+            "imprint_page": "impressum",
+            "career_page": "karriereseite",
+            "email": "email",
+            "phone": "telefon",
+            "person": "ansprechpartner",
+            "role": "rolle",
+            "status": "research_status",
+            "notes": "research_notes",
+            "employee_hint": "employee_hint",
+            "location_hint": "location_hint",
+        }
+        for source_key, column in mapping.items():
+            value = clean_text(research.get(source_key, ""))
+            if value:
+                frame.loc[idx, column] = value
+
+        pseudo_jobs = [{
+            "title": row["offene_stellen"] or "offene Positionen",
+            "city": city,
+            "description": "",
+            "source": row["source_list"],
+        }]
+        benefits = _split_pipe(row["benefits"])
+        if row["text_locked"] != "ja":
+            texts = create_sales_assets(
+                company=row["firma"],
+                jobs=pseudo_jobs,
+                benefits=benefits,
+                person=frame.loc[idx, "ansprechpartner"],
+                research=research,
+                api_key=openai_api_key,
+                model=openai_model,
+            )
+            for key in ASSET_KEYS:
+                frame.loc[idx, key] = texts.get(key, frame.loc[idx, key])
+            frame.loc[idx, "ai_status"] = texts.get("ai_status", "")
+            if texts.get("ai_status", "").startswith("KI erstellt"):
+                ai_count += 1
+        frame.loc[idx, "zuletzt_gefunden"] = date.today().isoformat()
+
+    return _migrate_frame(frame), [
+        f"Bestehende Leads geprüft: {researched}",
+        f"Websites gefunden: {websites}",
+        f"Direkte Kontakte gefunden: {contacts}",
+        f"KI Texte erstellt: {ai_count}",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# UI und Systemcheck
+# ---------------------------------------------------------------------------
+
+openai_api_key = str(st.secrets.get("openai_api_key", "")).strip()
+openai_model = str(st.secrets.get("openai_model", "gpt-5-mini")).strip() or "gpt-5-mini"
+serpapi_key = str(st.secrets.get("serpapi_key", "")).strip()
+adzuna_app_id = str(st.secrets.get("adzuna_app_id", "")).strip()
+adzuna_api_key = str(st.secrets.get("adzuna_api_key", "")).strip()
 
 st.sidebar.title("XING Daily Leads")
 page = st.sidebar.radio(
     "Bereich",
-    ["Daily Leads", "Follow-ups", "Alle Leads", "Salesforce-Abgleich", "CRM-Ausschluss"],
+    ["Daily Leads", "Follow ups", "Alle Leads", "Salesforce Abgleich", "CRM Ausschluss"],
 )
 
-st.sidebar.caption(
-    "Speicher: Google Sheets" if storage.mode == "google"
-    else "Speicher: lokaler Testmodus"
-)
+st.sidebar.markdown("### Systemcheck")
+st.sidebar.write(f"Speicher: {'Google Sheets' if storage.mode == 'google' else 'lokaler Testmodus'}")
+st.sidebar.write(f"OpenAI Paket: {'bereit' if openai_available() else 'fehlt'}")
+st.sidebar.write(f"OpenAI Key: {'hinterlegt' if openai_api_key else 'fehlt'}")
+st.sidebar.write(f"SerpApi: {'hinterlegt' if serpapi_key else 'nicht hinterlegt'}")
+st.sidebar.write(f"Adzuna: {'bereit' if adzuna_app_id and adzuna_api_key else 'Zugangsdaten fehlen'}")
 
-df = storage.load().reindex(columns=COLUMNS).fillna("")
+frame = storage.load()
 exclusions = storage.load_exclusions()
+
 
 if page == "Daily Leads":
     st.title("Daily Leads")
-    st.caption("Frische, eher kleine Direktkunden – vorrecherchiert und priorisiert.")
+    st.caption("Neue Direktkunden zuerst, vorhandene Leads nur bei neuen Informationen aktualisieren.")
 
-    with st.expander("Neue Leads suchen", expanded=df.empty):
-        terms = st.text_area(
-            "Suchbegriffe – eine Zeile je Begriff",
-            "\n".join(DEFAULT_SEARCH_TERMS),
-        )
+    with st.expander("Neue Leads suchen", expanded=frame.empty):
+        terms_text = st.text_area("Suchbegriffe, eine Zeile je Begriff", "\n".join(DEFAULT_SEARCH_TERMS))
         regions_text = st.text_area(
-            "Regionen – Format: Ort,Umkreis",
+            "Regionen im Format Ort,Umkreis",
             "\n".join(f"{city},{radius}" for city, radius in DEFAULT_REGIONS),
         )
+
         st.markdown("#### Quellen")
-        source_cols = st.columns(4)
-        use_adzuna = source_cols[0].checkbox(
-            "Adzuna",
-            value=True,
-            help="Automatische Jobsuche in Deutschland über deine hinterlegten Adzuna-Zugangsdaten.",
-        )
-        use_ba = source_cols[1].checkbox(
-            "Bundesagentur",
-            value=False,
-            help="Optionale Zusatzquelle. Ist standardmäßig ausgeschaltet.",
-        )
-        use_google = source_cols[2].checkbox(
-            "Google Jobs",
-            value=("serpapi_key" in st.secrets),
-            help="Benötigt zusätzlich einen SerpApi-Key in den Streamlit-Secrets.",
-        )
-        use_careers = source_cols[3].checkbox(
-            "Karriereseiten / ATS",
-            value=True,
-        )
+        source_columns = st.columns(4)
+        use_adzuna = source_columns[0].checkbox("Adzuna", value=bool(adzuna_app_id and adzuna_api_key))
+        use_ba = source_columns[1].checkbox("Bundesagentur", value=True)
+        use_google = source_columns[2].checkbox("Google Jobs", value=bool(serpapi_key))
+        use_careers = source_columns[3].checkbox("Karriereseiten", value=True)
 
         career_urls_text = st.text_area(
-            "Karriereseiten oder ATS-Boards – eine URL je Zeile",
+            "Optionale Karriereseiten oder ATS Boards, eine URL je Zeile",
             placeholder=(
                 "https://firma.jobs.personio.de\n"
                 "https://boards.greenhouse.io/firma\n"
                 "https://jobs.lever.co/firma\n"
                 "https://firma.de/karriere"
             ),
-            help="Personio, Greenhouse, Lever und JobPosting-Daten werden automatisch erkannt.",
         )
 
-        col1, col2, col3 = st.columns(3)
-        days = col1.number_input("Veröffentlicht seit Tagen", 1, 30, 7)
-        max_pages = col2.number_input("Seiten pro BA-Suche", 1, 10, 1)
-        max_research = col3.number_input("Websites recherchieren", 0, 100, 15)
+        settings_columns = st.columns(4)
+        days = settings_columns[0].number_input("Veröffentlicht seit Tagen", 1, 30, 14)
+        max_pages = settings_columns[1].number_input("Seiten je Suche", 1, 5, 1)
+        max_research = settings_columns[2].number_input("Websites recherchieren", 0, 100, 30)
+        term_batch_size = settings_columns[3].number_input("Suchbegriffe je Lauf", 1, 50, 12)
+
+        st.caption(
+            "Die Begriffe werden pro Lauf rotiert. Dadurch bleibt der Scan schnell und liefert nicht jeden Tag exakt dieselben Firmen."
+        )
 
         uploaded = st.file_uploader(
-            "Optional: Salesforce-CSV hochladen – Firmen werden künftig ausgeschlossen",
-            type=["csv"],
+            "Optionaler Salesforce Export, vorhandene Firmen werden ausgeschlossen",
+            type=["csv", "xlsx"],
+            key="quick_crm_upload",
         )
-
         if uploaded is not None:
             try:
-                crm = pd.read_csv(uploaded, dtype=str).fillna("")
-                company_col = st.selectbox("Spalte mit Firmennamen", crm.columns.tolist())
-                if st.button("CRM-Firmen übernehmen"):
-                    new_exclusions = set(exclusions)
-                    new_exclusions.update(normalize_company(v) for v in crm[company_col] if v)
-                    storage.save_exclusions(new_exclusions)
-                    st.success(f"{len(new_exclusions)} CRM-Firmen gespeichert.")
+                crm_companies, detected_column, row_count = read_company_file(uploaded)
+                st.info(f"Firmenspalte erkannt: {detected_column}. Zeilen: {row_count}.")
+                if st.button("CRM Firmen übernehmen", key="quick_crm_save"):
+                    storage.save_exclusions(set(exclusions) | crm_companies)
+                    st.success(f"{len(crm_companies)} Firmen übernommen.")
                     st.rerun()
             except Exception as exc:
-                st.error(f"CSV konnte nicht gelesen werden: {exc}")
+                st.error(str(exc))
 
         if st.button("Jetzt frische Leads laden", type="primary"):
-            search_terms = [x.strip() for x in terms.splitlines() if x.strip()]
-            regions = []
-            for line in regions_text.splitlines():
-                if not line.strip():
-                    continue
-                city, radius = line.rsplit(",", 1)
-                regions.append((city.strip(), int(radius.strip())))
+            all_terms = [line.strip() for line in terms_text.splitlines() if line.strip()]
+            regions: list[tuple[str, int]] = []
+            try:
+                for line in regions_text.splitlines():
+                    if not line.strip():
+                        continue
+                    city, radius = line.rsplit(",", 1)
+                    regions.append((city.strip(), int(radius.strip())))
+            except ValueError:
+                st.error("Mindestens eine Region hat nicht das Format Ort,Umkreis.")
+                st.stop()
 
-            active_sources = []
+            sources: list[str] = []
             if use_adzuna:
-                active_sources.append("Adzuna")
+                sources.append("Adzuna")
             if use_ba:
-                active_sources.append("Bundesagentur")
+                sources.append("Bundesagentur")
             if use_google:
-                active_sources.append("Google Jobs")
+                sources.append("Google Jobs")
             if use_careers:
-                active_sources.append("Karriereseiten")
-
-            if not active_sources:
-                st.error("Bitte mindestens eine Quelle aktivieren.")
+                sources.append("Karriereseiten")
+            if not sources:
+                st.error("Aktiviere mindestens eine Quelle.")
                 st.stop()
-
-            career_urls = [
-                line.strip() for line in career_urls_text.splitlines()
-                if line.strip()
-            ]
-            serpapi_key = str(st.secrets.get("serpapi_key", ""))
-            adzuna_app_id = str(st.secrets.get("adzuna_app_id", ""))
-            adzuna_api_key = str(st.secrets.get("adzuna_api_key", ""))
-
             if use_adzuna and (not adzuna_app_id or not adzuna_api_key):
-                st.error(
-                    "Adzuna ist aktiviert, aber die Zugangsdaten fehlen. "
-                    "Prüfe in Streamlit unter Settings → Secrets die Einträge "
-                    "adzuna_app_id und adzuna_api_key."
-                )
+                st.error("Adzuna ist aktiviert, aber adzuna_app_id oder adzuna_api_key fehlt in den Secrets.")
                 st.stop()
 
-            progress = st.progress(0, text="Mehrquellen-Suche läuft …")
-            parsed, diagnostics = scan_jobs(
+            scan_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            search_terms = _rotate_terms(all_terms, int(term_batch_size), scan_id)
+            career_urls = [line.strip() for line in career_urls_text.splitlines() if line.strip()]
+
+            progress = st.progress(0, text="Jobs werden aus mehreren Quellen geladen.")
+            parsed_jobs, scan_diagnostics = scan_jobs(
                 terms=search_terms,
                 regions=regions,
                 days=int(days),
                 max_pages=int(max_pages),
-                sources=active_sources,
+                sources=sources,
                 career_urls=career_urls,
                 serpapi_key=serpapi_key,
                 adzuna_app_id=adzuna_app_id,
                 adzuna_api_key=adzuna_api_key,
             )
-            progress.progress(0.75, text="Firmen werden gruppiert und recherchiert …")
+            progress.progress(0.55, text="Firmen werden priorisiert und recherchiert.")
 
-            fresh = build_leads(parsed, exclusions, int(max_research), serpapi_key)
-            merged, inserted, updated = upsert(df, fresh)
+            fresh, research_diagnostics = build_leads(
+                parsed_jobs=parsed_jobs,
+                exclusions=exclusions,
+                max_research=int(max_research),
+                serpapi_key=serpapi_key,
+                existing=frame,
+                openai_api_key=openai_api_key,
+                openai_model=openai_model,
+                scan_id=scan_id,
+            )
+            merged, inserted, updated = upsert(frame, fresh, scan_id)
+            merged = apply_crm_status(merged, exclusions)
             storage.save(merged)
-            df = apply_crm_status(storage.load(), exclusions)
-            storage.save(df)
+            frame = merged
             progress.empty()
 
-            st.success(
-                f"{inserted} neue Firmen, {updated} bestehende Firmen aktualisiert."
-            )
-            st.write(f"Gefundene eindeutige Stellen: {len(parsed)}")
-            st.write(f"Erstellte Firmen-Leads: {len(fresh)}")
-            st.write(f"Gespeicherte Leads insgesamt: {len(merged)}")
-
-            with st.expander("Technische Details"):
-                for message in diagnostics:
+            st.success(f"{inserted} neue Firmen, {updated} vorhandene Firmen aktualisiert.")
+            st.write(f"Verwendete Suchbegriffe: {', '.join(search_terms)}")
+            st.write(f"Priorisierte Stellen: {len(parsed_jobs)}")
+            st.write(f"Firmen Leads dieses Laufs: {len(fresh)}")
+            with st.expander("Technische Details", expanded=inserted == 0):
+                for message in scan_diagnostics + research_diagnostics:
                     st.write(f"• {message}")
-
-            if fresh.empty:
+            if inserted == 0:
                 st.warning(
-                    "Keine Firmen-Leads entstanden. Öffne die technischen Details direkt hier."
+                    "Dieser Lauf hat keine neue Firma geliefert. Die App zeigt deshalb nicht einfach wieder alle alten Leads als neu an. "
+                    "Starte einen weiteren Lauf mit anderen Begriffen, größerem Zeitraum oder einer zusätzlichen Region."
                 )
-            else:
-                st.session_state["last_scan_ok"] = True
-                st.info("Die Leads stehen direkt weiter unten auf dieser Seite.")
 
-    if df.empty:
+    incomplete_count = int(
+        (
+            (frame["website"] == "")
+            | ((frame["email"] == "") & (frame["telefon"] == ""))
+            | frame["ai_status"].str.startswith("Fallback", na=False)
+        ).sum()
+    ) if not frame.empty else 0
+
+    with st.expander(f"Bestehende Leads nachrecherchieren ({incomplete_count} unvollständig)"):
+        enrich_limit = st.number_input("Anzahl Leads", 1, 100, 20, key="enrich_limit")
+        st.caption(
+            "Diese Funktion sucht für bereits gespeicherte Leads erneut nach Website, Impressum, Kontakt, Telefon und Ansprechpartner."
+        )
+        if st.button("Unvollständige Leads jetzt anreichern", disabled=incomplete_count == 0):
+            progress = st.progress(0, text="Bestehende Leads werden nachrecherchiert.")
+            enriched, diagnostics = enrich_existing_leads(
+                frame,
+                limit=int(enrich_limit),
+                serpapi_key=serpapi_key,
+                openai_api_key=openai_api_key,
+                openai_model=openai_model,
+            )
+            enriched = apply_crm_status(enriched, exclusions)
+            storage.save(enriched)
+            frame = enriched
+            progress.empty()
+            st.success("Nachrecherche abgeschlossen.")
+            for message in diagnostics:
+                st.write(f"• {message}")
+
+    if frame.empty:
         st.info("Noch keine Leads vorhanden. Starte oben die erste Suche.")
     else:
-        new_df = df[
-            df["status"].isin(["Neu", "Für morgen", "Mail vorbereitet"])
-            & (df["crm_status"] != "Bereits in Salesforce")
+        scan_ids = [value for value in frame["scan_id"].unique().tolist() if value]
+        latest_scan = max(scan_ids) if scan_ids else ""
+        latest_frame = frame[frame["scan_id"] == latest_scan].copy() if latest_scan else frame.copy()
+        latest_frame = latest_frame[
+            latest_frame["status"].isin(["Neu", "Für morgen", "Mail vorbereitet"])
+            & (latest_frame["crm_status"] != "Bereits in Salesforce")
         ].copy()
-        new_df["lead_score"] = pd.to_numeric(new_df["lead_score"], errors="coerce").fillna(0)
-        new_df = new_df.sort_values("lead_score", ascending=False)
+        latest_frame["score_num"] = pd.to_numeric(latest_frame["lead_score"], errors="coerce").fillna(0)
+        latest_frame = latest_frame.sort_values("score_num", ascending=False)
+        new_only = latest_frame[latest_frame["first_seen_scan"] == latest_scan].copy() if latest_scan else latest_frame.copy()
 
-        hot_count = int((new_df["lead_score"] >= 75).sum())
-        warm_count = int(((new_df["lead_score"] >= 55) & (new_df["lead_score"] < 75)).sum())
-        observe_count = int((new_df["lead_score"] < 55).sum())
-        contactable_count = int(
-            ((new_df["email"] != "") | (new_df["telefon"] != "")).sum()
+        metric_columns = st.columns(4)
+        metric_columns[0].metric("Neu im letzten Lauf", len(new_only))
+        metric_columns[1].metric("HOT im letzten Lauf", int((latest_frame["score_num"] >= 75).sum()))
+        metric_columns[2].metric(
+            "Kontaktierbar",
+            int(((latest_frame["email"] != "") | (latest_frame["telefon"] != "")).sum()),
         )
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Heute anrufen", hot_count)
-        c2.metric("Diese Woche", warm_count)
-        c3.metric("Beobachten", observe_count)
-        c4.metric("Kontaktierbar", contactable_count)
+        metric_columns[3].metric(
+            "KI Texte",
+            int(latest_frame["ai_status"].str.startswith("KI erstellt", na=False).sum()),
+        )
 
         view_mode = st.radio(
-            "Arbeitsmodus",
-            ["Heute wirklich anrufen", "HOT + WARM", "Alle neuen Leads"],
+            "Ansicht",
+            ["Nur neue Unternehmen", "Letzten Lauf komplett", "Alle offenen Leads"],
             horizontal=True,
         )
-        if view_mode == "Heute wirklich anrufen":
-            display_df = new_df[new_df["lead_score"] >= 75].head(30)
-        elif view_mode == "HOT + WARM":
-            display_df = new_df[new_df["lead_score"] >= 55].head(100)
+        if view_mode == "Nur neue Unternehmen":
+            display_frame = new_only.head(100)
+        elif view_mode == "Letzten Lauf komplett":
+            display_frame = latest_frame.head(150)
         else:
-            display_df = new_df.head(250)
+            display_frame = frame[
+                ~frame["status"].isin(["In Salesforce übernommen", "Ausschließen"])
+                & (frame["crm_status"] != "Bereits in Salesforce")
+            ].copy()
+            display_frame["score_num"] = pd.to_numeric(display_frame["lead_score"], errors="coerce").fillna(0)
+            display_frame = display_frame.sort_values("score_num", ascending=False).head(250)
 
-        st.caption(
-            f"{len(display_df)} Firmen werden angezeigt. "
-            "Personaldienstleister und stark gemischte Massenanzeigen erhalten deutliche Abzüge."
-        )
+        if display_frame.empty:
+            st.info("In dieser Ansicht gibt es aktuell keine Leads.")
 
-        for idx, row in display_df.iterrows():
+        for idx, row in display_frame.iterrows():
             with st.container(border=True):
-                top1, top2, top3 = st.columns([5, 2, 2])
-                top1.subheader(row["firma"])
-                top2.metric(row["hot_status"], int(float(row["lead_score"] or 0)))
-                top3.write(row["veroeffentlicht_am"] or "Datum offen")
+                header_columns = st.columns([5, 2, 2])
+                header_columns[0].subheader(row["firma"])
+                header_columns[1].metric(row["hot_status"], int(float(row["lead_score"] or 0)))
+                header_columns[2].write(row["veroeffentlicht_am"] or "Datum offen")
 
                 st.write(f"**Stellenschwerpunkte:** {row['offene_stellen']}")
-                st.write(f"**Warum interessant:** {row['warum_hot']}")
+                st.write(f"**Warum interessant:** {row['warum_hot'] or 'noch keine belastbare Begründung'}")
                 if row["benefits"]:
                     st.write(f"**Benefits:** {row['benefits']}")
+                if row["source_list"]:
+                    st.caption(f"Quellen: {row['source_list']} · bisher {row['times_seen'] or '1'} Mal gefunden")
 
-                a, b, c = st.columns(3)
-                a.write(f"**Ansprechpartner:** {row['ansprechpartner'] or 'nicht sicher gefunden'}")
-                b.write(f"**E-Mail:** {row['email'] or 'nicht gefunden'}")
-                c.write(f"**Telefon:** {row['telefon'] or 'nicht gefunden'}")
+                contact_columns = st.columns(3)
+                contact_columns[0].write(f"**Ansprechpartner:** {row['ansprechpartner'] or 'nicht sicher gefunden'}")
+                contact_columns[1].write(f"**E Mail:** {row['email'] or 'nicht gefunden'}")
+                contact_columns[2].write(f"**Telefon:** {row['telefon'] or 'nicht gefunden'}")
 
-                link_cols = st.columns(3)
+                st.caption(
+                    f"Recherche: {row['research_status'] or 'offen'} · {row['research_notes'] or 'keine Details'}"
+                )
+                st.caption(f"Texte: {row['ai_status'] or 'nicht erstellt'}")
+
+                link_columns = st.columns(5)
                 if row["website"]:
-                    link_cols[0].link_button("Website", row["website"])
-                if row["stellenlink"]:
-                    link_cols[1].link_button("Stelle öffnen", row["stellenlink"])
+                    link_columns[0].link_button("Website", row["website"])
                 if row["kontaktseite"]:
-                    link_cols[2].link_button("Kontaktseite", row["kontaktseite"])
+                    link_columns[1].link_button("Kontakt", row["kontaktseite"])
+                if row["impressum"]:
+                    link_columns[2].link_button("Impressum", row["impressum"])
+                if row["karriereseite"]:
+                    link_columns[3].link_button("Karriere", row["karriereseite"])
+                if row["stellenlink"]:
+                    link_columns[4].link_button("Stelle", row["stellenlink"])
 
-                tabs = st.tabs(["Call", "Erstmail", "Follow-ups", "Bearbeiten"])
+                tabs = st.tabs(["Call", "Erstmail", "Follow ups", "Bearbeiten"])
                 with tabs[0]:
-                    st.text_area("Call-Opener", row["call_opener"], height=120, key=f"call_{row['lead_id']}")
-                    st.text_area("Discovery-Fragen", row["discovery_fragen"], height=190, key=f"disc_{row['lead_id']}")
+                    call_value = st.text_area(
+                        "Call Opener",
+                        row["call_opener"],
+                        height=120,
+                        key=f"call_{row['lead_id']}",
+                    )
+                    discovery_value = st.text_area(
+                        "Discovery Fragen",
+                        row["discovery_fragen"],
+                        height=230,
+                        key=f"disc_{row['lead_id']}",
+                    )
+                    challenger_value = st.text_area(
+                        "Challenger Reframe",
+                        row["challenger_reframe"],
+                        height=130,
+                        key=f"challenger_{row['lead_id']}",
+                    )
                 with tabs[1]:
-                    st.text_input("Betreff", row["erstmail_betreff"], key=f"subj_{row['lead_id']}")
-                    st.text_area("Mail", row["erstmail"], height=300, key=f"mail_{row['lead_id']}")
+                    subject_value = st.text_input(
+                        "Betreff",
+                        row["erstmail_betreff"],
+                        key=f"subject_{row['lead_id']}",
+                    )
+                    mail_value = st.text_area(
+                        "Mail",
+                        row["erstmail"],
+                        height=300,
+                        key=f"mail_{row['lead_id']}",
+                    )
                 with tabs[2]:
-                    st.text_area("Follow-up 1", row["follow_up_1"], height=240, key=f"f1_{row['lead_id']}")
-                    st.text_area("Follow-up 2", row["follow_up_2"], height=240, key=f"f2_{row['lead_id']}")
+                    follow1_value = st.text_area(
+                        "Follow up 1",
+                        row["follow_up_1"],
+                        height=220,
+                        key=f"follow1_{row['lead_id']}",
+                    )
+                    follow2_value = st.text_area(
+                        "Follow up 2",
+                        row["follow_up_2"],
+                        height=220,
+                        key=f"follow2_{row['lead_id']}",
+                    )
                 with tabs[3]:
-                    status = st.selectbox(
-                        "Status", STATUSES,
+                    status_value = st.selectbox(
+                        "Status",
+                        STATUSES,
                         index=STATUSES.index(row["status"]) if row["status"] in STATUSES else 0,
                         key=f"status_{row['lead_id']}",
                     )
-                    due = st.date_input(
+                    parsed_due = pd.to_datetime(row["wiedervorlage"], errors="coerce")
+                    due_default = parsed_due.date() if not pd.isna(parsed_due) else date.today() + timedelta(days=2)
+                    due_value = st.date_input(
                         "Wiedervorlage",
-                        value=pd.to_datetime(row["wiedervorlage"], errors="coerce").date()
-                        if row["wiedervorlage"] else date.today() + timedelta(days=2),
+                        value=due_default,
                         key=f"due_{row['lead_id']}",
                     )
-                    note = st.text_area("Kurze Arbeitsnotiz", row["notiz"], key=f"note_{row['lead_id']}")
-                    if st.button("Speichern", key=f"save_{row['lead_id']}"):
-                        df.loc[idx, "status"] = status
-                        df.loc[idx, "wiedervorlage"] = due.isoformat()
-                        df.loc[idx, "notiz"] = note
-                        storage.save(df)
+                    note_value = st.text_area(
+                        "Arbeitsnotiz",
+                        row["notiz"],
+                        key=f"note_{row['lead_id']}",
+                    )
+                    lock_value = st.checkbox(
+                        "Meine Textänderungen bei künftigen Scans beibehalten",
+                        value=row["text_locked"] == "ja",
+                        key=f"lock_{row['lead_id']}",
+                    )
+                    if st.button("Änderungen speichern", key=f"save_{row['lead_id']}"):
+                        frame.loc[idx, "call_opener"] = call_value
+                        frame.loc[idx, "discovery_fragen"] = discovery_value
+                        frame.loc[idx, "challenger_reframe"] = challenger_value
+                        frame.loc[idx, "erstmail_betreff"] = subject_value
+                        frame.loc[idx, "erstmail"] = mail_value
+                        frame.loc[idx, "follow_up_1"] = follow1_value
+                        frame.loc[idx, "follow_up_2"] = follow2_value
+                        frame.loc[idx, "status"] = status_value
+                        frame.loc[idx, "wiedervorlage"] = due_value.isoformat()
+                        frame.loc[idx, "notiz"] = note_value
+                        frame.loc[idx, "text_locked"] = "ja" if lock_value else ""
+                        storage.save(frame)
                         st.success("Gespeichert.")
                         st.rerun()
 
-elif page == "Follow-ups":
-    st.title("Follow-ups")
+elif page == "Follow ups":
+    st.title("Follow ups")
     today = date.today().isoformat()
-    due_df = df[
-        (df["wiedervorlage"] != "")
-        & (df["wiedervorlage"] <= today)
-        & (~df["status"].isin(["In Salesforce übernommen", "Ausschließen"]))
+    due_frame = frame[
+        (frame["wiedervorlage"] != "")
+        & (frame["wiedervorlage"] <= today)
+        & (~frame["status"].isin(["In Salesforce übernommen", "Ausschließen"]))
     ].copy()
-
-    if due_df.empty:
-        st.success("Keine Follow-ups fällig.")
+    if due_frame.empty:
+        st.success("Keine Follow ups fällig.")
     else:
-        for idx, row in due_df.iterrows():
+        for idx, row in due_frame.iterrows():
             with st.container(border=True):
                 st.subheader(row["firma"])
                 st.write(f"**Fällig:** {row['wiedervorlage']} · **Status:** {row['status']}")
                 st.write(f"**Kontakt:** {row['ansprechpartner']} · {row['email']} · {row['telefon']}")
-                st.text_area("Follow-up", row["follow_up_1"], height=240, key=f"due_mail_{row['lead_id']}")
-                col1, col2 = st.columns(2)
-                if col1.button("In Salesforce übernommen", key=f"sf_{row['lead_id']}"):
-                    df.loc[idx, "status"] = "In Salesforce übernommen"
-                    storage.save(df)
+                st.text_area("Follow up", row["follow_up_1"], height=240, key=f"due_mail_{row['lead_id']}")
+                action_columns = st.columns(2)
+                if action_columns[0].button("In Salesforce übernommen", key=f"sf_{row['lead_id']}"):
+                    frame.loc[idx, "status"] = "In Salesforce übernommen"
+                    storage.save(frame)
                     st.rerun()
-                if col2.button("Noch 3 Tage", key=f"plus3_{row['lead_id']}"):
-                    df.loc[idx, "wiedervorlage"] = (date.today() + timedelta(days=3)).isoformat()
-                    storage.save(df)
+                if action_columns[1].button("Noch drei Tage", key=f"plus3_{row['lead_id']}"):
+                    frame.loc[idx, "wiedervorlage"] = (date.today() + timedelta(days=3)).isoformat()
+                    storage.save(frame)
                     st.rerun()
 
 elif page == "Alle Leads":
     st.title("Alle Leads")
     search = st.text_input("Suche")
-    filtered = df.copy()
+    filtered = frame.copy()
     if search:
         mask = filtered.astype(str).apply(
-            lambda col: col.str.contains(search, case=False, na=False)
+            lambda column: column.str.contains(search, case=False, na=False)
         ).any(axis=1)
         filtered = filtered[mask]
-
+    table = filtered[[
+        "hot_status", "lead_score", "firma", "crm_status", "anzahl_stellen",
+        "offene_stellen", "orte", "ansprechpartner", "rolle", "email", "telefon",
+        "website", "kontaktseite", "research_status", "ai_status", "status",
+        "wiedervorlage", "first_seen", "zuletzt_gefunden", "times_seen",
+    ]].copy()
+    table["lead_score"] = pd.to_numeric(table["lead_score"], errors="coerce").fillna(0).astype(int)
     st.dataframe(
-        filtered[[
-            "hot_status", "lead_score", "firma", "crm_status",
-            "anzahl_stellen", "offene_stellen", "orte",
-            "ansprechpartner", "rolle", "email", "telefon",
-            "website", "kontaktseite", "status",
-            "wiedervorlage", "zuletzt_gefunden",
-        ]],
+        table,
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -1500,55 +1263,44 @@ elif page == "Alle Leads":
         mime="text/csv",
     )
 
-elif page == "Salesforce-Abgleich":
-    st.title("Salesforce-Abgleich")
+elif page == "Salesforce Abgleich":
+    st.title("Salesforce Abgleich")
     st.write(
-        "Lade einen Salesforce-Account-Export als CSV oder XLSX hoch. "
-        "Bereits vorhandene Firmen werden dauerhaft in die Ausschlussliste übernommen "
-        "und bei neuen Scans nicht mehr als neue Leads angelegt."
+        "Lade einen Salesforce Account Export als CSV oder XLSX hoch. Vorhandene Firmen werden dauerhaft ausgeschlossen."
     )
-    crm_file = st.file_uploader(
-        "Salesforce-Export hochladen",
-        type=["csv", "xlsx"],
-        key="salesforce_export",
-    )
+    crm_file = st.file_uploader("Salesforce Export hochladen", type=["csv", "xlsx"], key="salesforce_export")
     if crm_file is not None:
         try:
             crm_companies, detected_column, row_count = read_company_file(crm_file)
             matches = {
                 normalize_company(company)
-                for company in df.get("firma", [])
-                if normalize_company(company) in crm_companies
+                for company in frame.get("firma", [])
+                if _crm_match(company, crm_companies)
             }
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Zeilen im Export", row_count)
-            c2.metric("Eindeutige Firmen", len(crm_companies))
-            c3.metric("Treffer in Leadliste", len(matches))
+            metric_columns = st.columns(3)
+            metric_columns[0].metric("Zeilen im Export", row_count)
+            metric_columns[1].metric("Eindeutige Firmen", len(crm_companies))
+            metric_columns[2].metric("Treffer in Leadliste", len(matches))
             st.info(f"Erkannte Firmenspalte: {detected_column}")
-            if st.button("Salesforce-Firmen dauerhaft abgleichen"):
+            if st.button("Salesforce Firmen dauerhaft abgleichen"):
                 combined = set(exclusions) | crm_companies
                 storage.save_exclusions(combined)
-                df = apply_crm_status(df, combined)
-                storage.save(df)
-                st.success(
-                    f"{len(crm_companies)} Salesforce-Firmen gespeichert. "
-                    f"{len(matches)} vorhandene Leads wurden als Bestand erkannt."
-                )
+                frame = apply_crm_status(frame, combined)
+                storage.save(frame)
+                st.success(f"{len(crm_companies)} Salesforce Firmen gespeichert.")
                 st.rerun()
         except Exception as exc:
             st.error(str(exc))
 
-elif page == "CRM-Ausschluss":
-    st.title("CRM-Ausschluss")
+elif page == "CRM Ausschluss":
+    st.title("CRM Ausschluss")
     st.caption("Diese Firmen werden bei neuen Suchläufen nicht mehr als Leads angelegt.")
-
-    manual = st.text_area("Firmen hinzufügen – eine Zeile je Firma")
+    manual = st.text_area("Firmen hinzufügen, eine Zeile je Firma")
     if st.button("Firmen speichern"):
-        new_items = {normalize_company(v) for v in manual.splitlines() if v.strip()}
+        new_items = {normalize_company(value) for value in manual.splitlines() if value.strip()}
         storage.save_exclusions(set(exclusions) | new_items)
         st.success("Ausschlussliste aktualisiert.")
         st.rerun()
-
     st.write(f"**Aktuell gespeichert:** {len(exclusions)} Firmen")
     if exclusions:
         st.dataframe(pd.DataFrame({"Firma normalisiert": sorted(exclusions)}), hide_index=True)
