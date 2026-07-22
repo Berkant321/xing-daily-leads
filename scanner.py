@@ -628,6 +628,210 @@ def deduplicate(jobs: list[dict]) -> list[dict]:
     return output
 
 
+# ---------------------------------------------------------------------------
+# Lead-Scoring und Ausschlussregeln
+# ---------------------------------------------------------------------------
+
+STAFFING_KEYWORDS = {
+    "zeitarbeit", "arbeitnehmerüberlassung", "personaldienstleistung",
+    "personalvermittlung", "personalberatung", "staffing", "headhunter",
+    "direktvermittlung", "randstad", "adecco", "manpower", "office people",
+    "iperdi", "bindan", "pluss personalmanagement", "akut medizin",
+    "promedis24", "rocket match", "job ag", "runtime", "tempton",
+    "timepartner", "dis ag", "amadeus fire", "ferchau", "wirtz medical",
+    "avanti", "all.medi", "medcareer", "pacura med"
+}
+
+PUBLIC_KEYWORDS = {
+    "stadtverwaltung", "kreisverwaltung", "landratsamt", "bezirksamt",
+    "bundesamt", "landesamt", "ministerium", "polizei", "bundeswehr",
+    "agentur für arbeit", "jobcenter", "finanzamt", "justizvollzug",
+    "universität", "hochschule", "studentenwerk", "studierendenwerk",
+    "öffentlicher dienst", "tvöd", "tv-l", "kommunalverwaltung"
+}
+
+LARGE_COMPANY_KEYWORDS = {
+    "deutsche bahn", "db regio", "db infrago", "deutsche post", "dhl",
+    "amazon", "siemens", "bosch", "volkswagen", "mercedes-benz", "bmw group",
+    "continental", "lidl", "kaufland", "aldi", "rewe group",
+    "deutsche telekom", "vodafone", "allianz", "helios kliniken",
+    "asklepios", "sana kliniken", "ameos", "korian", "fresenius",
+    "thyssenkrupp", "basf", "bayer ag", "rwe ag", "e.on", "ikea", "zalando"
+}
+
+TARGET_KEYWORDS = {
+    "physio": 24, "ergotherapeut": 24, "ergotherapie": 24, "logopä": 24,
+    "sprachtherap": 24, "pflegefach": 22, "ambulante pflege": 24, "pflege": 20,
+    "steuerfach": 23, "steuerkanzlei": 22, "bilanzbuchhalter": 20,
+    "lohnbuchhalter": 19, "elektriker": 18, "elektroniker": 18,
+    "anlagenmechaniker": 18, "shk": 18, "sanitär": 17, "heizung": 17,
+    "klima": 17, "metallbau": 16, "schweißer": 16, "zerspan": 17,
+    "cnc": 17, "mechatroniker": 17, "tischler": 16, "schreiner": 16,
+    "dachdecker": 16, "maler": 15, "bauleiter": 18, "projektleiter": 16,
+    "konstrukteur": 16, "ingenieur": 15, "softwareentwickler": 15,
+    "it administrator": 15, "systemadministrator": 15, "vertrieb": 12,
+    "sales": 12, "produktion": 12, "maschinenbediener": 14, "zahnarzt": 17,
+    "zahnmedizin": 18, "medizinische fachangestellte": 18, "mfa": 17,
+    "praxis": 12, "therapie": 18
+}
+
+BUYING_SIGNALS = {
+    "ab sofort": 4, "dringend": 7, "schnellstmöglich": 7,
+    "zum nächstmöglichen zeitpunkt": 5, "unbefristet": 3,
+    "mehrere standorte": 5, "wachstum": 6, "verstärkung": 3,
+    "team erweitern": 6, "neu eröffnet": 8, "neuer standort": 8
+}
+
+BENEFIT_KEYWORDS = {
+    "30 tage urlaub": 3, "31 tage urlaub": 4, "32 tage urlaub": 4,
+    "33 tage urlaub": 5, "34 tage urlaub": 5, "35 tage urlaub": 6,
+    "jobrad": 3, "jobticket": 3, "firmenwagen": 4, "fortbildung": 3,
+    "weiterbildung": 3, "flexible arbeitszeit": 3, "homeoffice": 2,
+    "betriebliche altersvorsorge": 2, "gesundheitsbudget": 3,
+    "keine wochenendarbeit": 4, "keine schichtarbeit": 4, "übertarif": 3
+}
+
+MIN_LEAD_SCORE = 18
+
+def _norm(value: Any) -> str:
+    text = _clean(value).lower()
+    return text.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
+
+def _company_key(company: str) -> str:
+    text = _norm(company)
+    for token in [" gmbh", " mbh", " ag", " kg", " ohg", " ug", " e.v.", " ev", " gbr", " se", " & co"]:
+        text = text.replace(token, " ")
+    return re.sub(r"\W+", "", text)
+
+def _hit(text: str, keywords: set[str]) -> str:
+    normal = _norm(text)
+    for keyword in keywords:
+        if _norm(keyword) in normal:
+            return keyword
+    return ""
+
+def _weighted(text: str, mapping: dict[str, int]) -> tuple[int, list[str]]:
+    normal = _norm(text)
+    score, hits = 0, []
+    for keyword, points in mapping.items():
+        if _norm(keyword) in normal:
+            score += points
+            hits.append(keyword)
+    return score, hits
+
+def _company_stats(jobs: list[dict]) -> dict[str, dict]:
+    grouped: dict[str, list[dict]] = {}
+    for job in jobs:
+        grouped.setdefault(_company_key(job.get("company", "")), []).append(job)
+    result = {}
+    for key, items in grouped.items():
+        result[key] = {
+            "job_count": len(items),
+            "distinct_titles": len({_norm(x.get("title", "")) for x in items}),
+            "location_count": len({_norm(x.get("city", "")) for x in items if x.get("city")}),
+            "source_count": len({x.get("source", "") for x in items if x.get("source")}),
+        }
+    return result
+
+def score_and_filter(jobs: list[dict], diagnostics: list[str]) -> list[dict]:
+    unique = deduplicate(jobs)
+    stats = _company_stats(unique)
+    output = []
+    excluded = {"staffing": 0, "public": 0, "large": 0, "low_score": 0}
+
+    for job in unique:
+        company = job.get("company", "")
+        title = job.get("title", "")
+        description = job.get("description", "")
+        combined = " ".join([company, title, description, job.get("term", "")])
+
+        if _hit(combined, STAFFING_KEYWORDS):
+            excluded["staffing"] += 1
+            continue
+        if _hit(company + " " + title + " " + description[:1200], PUBLIC_KEYWORDS):
+            excluded["public"] += 1
+            continue
+        if _hit(company, LARGE_COMPANY_KEYWORDS):
+            excluded["large"] += 1
+            continue
+
+        company_data = stats.get(_company_key(company), {})
+        score = 8
+        reasons = []
+
+        points, hits = _weighted(combined, TARGET_KEYWORDS)
+        if points:
+            score += min(34, points)
+            reasons.append("Zielgruppe: " + ", ".join(hits[:3]))
+
+        points, hits = _weighted(combined, BUYING_SIGNALS)
+        if points:
+            score += min(15, points)
+            reasons.append("Recruitingdruck: " + ", ".join(hits[:3]))
+
+        points, hits = _weighted(description, BENEFIT_KEYWORDS)
+        if points:
+            score += min(12, points)
+            reasons.append("Benefits: " + ", ".join(hits[:3]))
+
+        job_count = company_data.get("job_count", 1)
+        distinct_titles = company_data.get("distinct_titles", 1)
+        location_count = company_data.get("location_count", 1)
+        source_count = company_data.get("source_count", 1)
+
+        if job_count >= 2:
+            score += min(18, 5 + (job_count - 2) * 2)
+            reasons.append(f"{job_count} offene Stellen")
+        if distinct_titles >= 2:
+            score += min(8, distinct_titles * 2)
+            reasons.append(f"{distinct_titles} verschiedene Rollen")
+        if location_count >= 2:
+            score += min(7, location_count * 2)
+            reasons.append(f"{location_count} Standorte")
+        if source_count >= 2:
+            score += 4
+            reasons.append("mehrere Jobquellen")
+
+        if job.get("email"):
+            score += 8
+            reasons.append("E-Mail vorhanden")
+        if job.get("contact"):
+            score += 7
+            reasons.append("Ansprechpartner vorhanden")
+        if job.get("phone"):
+            score += 4
+        if job.get("external_url"):
+            score += 3
+        if len(description) >= 500:
+            score += 3
+        if job.get("source") == "Karriereseite":
+            score += 5
+            reasons.append("eigene Karriereseite")
+
+        if job_count >= 20:
+            score -= 16
+        elif job_count >= 10:
+            score -= 8
+
+        score = max(0, min(100, score))
+        if score < MIN_LEAD_SCORE:
+            excluded["low_score"] += 1
+            continue
+
+        job.update(company_data)
+        job["lead_score"] = score
+        job["lead_quality"] = "A" if score >= 75 else "B" if score >= 55 else "C"
+        job["lead_reasons"] = "; ".join(reasons[:7])
+        output.append(job)
+
+    output.sort(key=lambda x: (x.get("lead_score", 0), x.get("job_count", 0), bool(x.get("contact")), bool(x.get("email"))), reverse=True)
+    diagnostics.append(
+        f"Lead-Filter: {len(unique)} eindeutige Stellen geprüft, {len(output)} verkaufsrelevante Treffer. "
+        f"Raus: Staffing {excluded['staffing']}, öffentlich {excluded['public']}, Großunternehmen {excluded['large']}, Score {excluded['low_score']}."
+    )
+    return output
+
+
 def scan_jobs(
     *,
     terms: list[str],
@@ -665,8 +869,8 @@ def scan_jobs(
     if "Karriereseiten" in sources:
         jobs.extend(scan_career_urls(career_urls or [], diagnostics))
 
-    unique_jobs = deduplicate(jobs)
+    filtered_jobs = score_and_filter(jobs, diagnostics)
     diagnostics.append(
-        f"Gesamt: {len(unique_jobs)} eindeutige Stellen aus {len(sources)} aktivierten Quellen."
+        f"Gesamt: {len(filtered_jobs)} priorisierte Leads aus {len(sources)} aktivierten Quellen."
     )
-    return unique_jobs, diagnostics
+    return filtered_jobs, diagnostics
