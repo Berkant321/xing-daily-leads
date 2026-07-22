@@ -11,6 +11,7 @@ from urllib.parse import urljoin, urlparse
 import pandas as pd
 import requests
 import streamlit as st
+from openai import OpenAI
 import tldextract
 from bs4 import BeautifulSoup
 
@@ -23,6 +24,13 @@ except Exception:
     gspread = None
     Credentials = None
 
+client = OpenAI(api_key="DEIN_API_KEY")
+def ai_test():
+    response = client.responses.create(
+        model="gpt-5-mini",
+        input="Antworte nur mit: KI funktioniert."
+    )
+    return response.output_text
 st.set_page_config(
     page_title="XING Daily Leads",
     page_icon="📞",
@@ -1464,3 +1472,6 @@ elif page == "CRM-Ausschluss":
     st.write(f"**Aktuell gespeichert:** {len(exclusions)} Firmen")
     if exclusions:
         st.dataframe(pd.DataFrame({"Firma normalisiert": sorted(exclusions)}), hide_index=True)
+
+if st.button("KI testen"):
+    st.success(ai_test())
