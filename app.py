@@ -24,7 +24,7 @@ except Exception:
     gspread = None
     Credentials = None
 
-client = OpenAI(api_key="DEIN_API_KEY")
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 def ai_test():
     response = client.responses.create(
         model="gpt-5-mini",
