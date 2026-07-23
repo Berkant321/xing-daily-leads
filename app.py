@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 import unicodedata
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -297,15 +298,39 @@ def _facts_hash(company: str, jobs: list[dict], benefits: list[str], research: d
 # Speicher
 # ---------------------------------------------------------------------------
 
+def _google_call(func, *args, **kwargs):
+    """Retry only temporary Google quota errors with exponential backoff."""
+    delays = (0, 5, 15, 30)
+    last_error = None
+    for delay in delays:
+        if delay:
+            time.sleep(delay)
+        try:
+            return func(*args, **kwargs)
+        except Exception as exc:
+            last_error = exc
+            message = str(exc).lower()
+            temporary = "429" in message or "quota exceeded" in message or "resource_exhausted" in message
+            if not temporary:
+                raise
+    raise last_error
+
+
 class Storage:
     def __init__(self):
         self.mode = "local"
+        self.error = ""
         self.ws = None
         self.exclusion_ws = None
         self.local_path = "leads_local.csv"
         self.local_exclusion_path = "crm_ausschluss_local.csv"
+        self.google_configured = bool(
+            gspread
+            and "gcp_service_account" in st.secrets
+            and "spreadsheet_name" in st.secrets
+        )
 
-        if gspread and "gcp_service_account" in st.secrets and "spreadsheet_name" in st.secrets:
+        if self.google_configured:
             try:
                 creds = Credentials.from_service_account_info(
                     dict(st.secrets["gcp_service_account"]),
@@ -315,24 +340,37 @@ class Storage:
                     ],
                 )
                 client = gspread.authorize(creds)
-                book = client.open(str(st.secrets["spreadsheet_name"]))
-                self.ws = self._sheet(book, "Leads", 8000, max(60, len(COLUMNS) + 5))
-                self.exclusion_ws = self._sheet(book, "CRM_Ausschluss", 8000, 5)
+                book = _google_call(client.open, str(st.secrets["spreadsheet_name"]))
+
+                # One worksheet-list request instead of repeating it for every tab.
+                worksheets = {worksheet.title: worksheet for worksheet in _google_call(book.worksheets)}
+                self.ws = self._sheet(book, worksheets, "Leads", 8000, max(60, len(COLUMNS) + 5))
+                self.exclusion_ws = self._sheet(book, worksheets, "CRM_Ausschluss", 8000, 5)
                 self.mode = "google"
             except Exception as exc:
-                st.sidebar.warning(f"Google Sheets nicht verbunden: {exc}")
+                # Never fall back silently to ephemeral local storage when Google
+                # was explicitly configured. That could make users believe data is persistent.
+                self.mode = "google_error"
+                self.error = str(exc)
 
     @staticmethod
-    def _sheet(book, title: str, rows: int, cols: int):
-        names = [worksheet.title for worksheet in book.worksheets()]
-        if title in names:
-            return book.worksheet(title)
-        return book.add_worksheet(title=title, rows=rows, cols=cols)
+    def _sheet(book, worksheets: dict, title: str, rows: int, cols: int):
+        if title in worksheets:
+            return worksheets[title]
+        worksheet = _google_call(book.add_worksheet, title=title, rows=rows, cols=cols)
+        try:
+            _google_call(worksheet.freeze, rows=1)
+        except Exception:
+            pass
+        worksheets[title] = worksheet
+        return worksheet
 
     def load(self) -> pd.DataFrame:
         if self.mode == "google":
-            values = self.ws.get_all_records()
+            values = _google_call(self.ws.get_all_records)
             return _migrate_frame(pd.DataFrame(values))
+        if self.mode == "google_error":
+            raise RuntimeError(self.error or "Google Sheets ist nicht verbunden.")
         try:
             return _migrate_frame(pd.read_csv(self.local_path, dtype=str).fillna(""))
         except FileNotFoundError:
@@ -341,20 +379,23 @@ class Storage:
     def save(self, frame: pd.DataFrame) -> None:
         frame = _migrate_frame(frame)
         if self.mode == "google":
-            self.ws.clear()
-            self.ws.update([COLUMNS] + frame.astype(str).values.tolist())
-            self.ws.freeze(rows=1)
+            _google_call(self.ws.clear)
+            _google_call(self.ws.update, [COLUMNS] + frame.astype(str).values.tolist())
+        elif self.mode == "google_error":
+            raise RuntimeError(self.error or "Google Sheets ist nicht verbunden.")
         else:
             frame.to_csv(self.local_path, index=False)
 
     def load_exclusions(self) -> set[str]:
         if self.mode == "google":
-            values = self.exclusion_ws.get_all_records()
+            values = _google_call(self.exclusion_ws.get_all_records)
             return {
                 normalize_company(row.get("firma", ""))
                 for row in values
                 if row.get("firma")
             }
+        if self.mode == "google_error":
+            raise RuntimeError(self.error or "Google Sheets ist nicht verbunden.")
         try:
             frame = pd.read_csv(self.local_exclusion_path, dtype=str).fillna("")
             return {normalize_company(value) for value in frame.get("firma", []) if value}
@@ -364,14 +405,34 @@ class Storage:
     def save_exclusions(self, companies: set[str]) -> None:
         rows = sorted({normalize_company(company) for company in companies if normalize_company(company)})
         if self.mode == "google":
-            self.exclusion_ws.clear()
-            self.exclusion_ws.update([["firma"]] + [[company] for company in rows])
-            self.exclusion_ws.freeze(rows=1)
+            _google_call(self.exclusion_ws.clear)
+            _google_call(self.exclusion_ws.update, [["firma"]] + [[company] for company in rows])
+        elif self.mode == "google_error":
+            raise RuntimeError(self.error or "Google Sheets ist nicht verbunden.")
         else:
             pd.DataFrame({"firma": rows}).to_csv(self.local_exclusion_path, index=False)
 
 
-storage = Storage()
+@st.cache_resource(show_spinner=False)
+def get_storage() -> Storage:
+    # Streamlit reruns the script for every widget interaction. Caching the
+    # connection prevents a fresh burst of Google API reads on every rerun.
+    return Storage()
+
+
+storage = get_storage()
+
+
+def persist_frame(frame: pd.DataFrame) -> None:
+    migrated = _migrate_frame(frame)
+    storage.save(migrated)
+    st.session_state["xing_frame_cache"] = migrated.copy()
+
+
+def persist_exclusions(companies: set[str]) -> None:
+    normalized = {normalize_company(company) for company in companies if normalize_company(company)}
+    storage.save_exclusions(normalized)
+    st.session_state["xing_exclusions_cache"] = set(normalized)
 
 
 def read_company_file(uploaded_file):
@@ -874,14 +935,41 @@ page = st.sidebar.radio(
 )
 
 st.sidebar.markdown("### Systemcheck")
-st.sidebar.write(f"Speicher: {'Google Sheets' if storage.mode == 'google' else 'lokaler Testmodus'}")
+if storage.mode == "google":
+    storage_label = "Google Sheets"
+elif storage.mode == "google_error":
+    storage_label = "Google Sheets Fehler"
+else:
+    storage_label = "lokaler Testmodus"
+st.sidebar.write(f"Speicher: {storage_label}")
 st.sidebar.write(f"OpenAI Paket: {'bereit' if openai_available() else 'fehlt'}")
 st.sidebar.write(f"OpenAI Key: {'hinterlegt' if openai_api_key else 'fehlt'}")
 st.sidebar.write(f"SerpApi: {'hinterlegt' if serpapi_key else 'nicht hinterlegt'}")
 st.sidebar.write(f"Adzuna: {'bereit' if adzuna_app_id and adzuna_api_key else 'Zugangsdaten fehlen'}")
 
-frame = storage.load()
-exclusions = storage.load_exclusions()
+if storage.mode == "google_error":
+    st.error(
+        "Google Sheets ist konfiguriert, konnte aber nicht verbunden werden. "
+        "Die App wechselt aus Sicherheitsgründen nicht in den flüchtigen lokalen Speicher. "
+        f"Fehler: {storage.error}"
+    )
+    st.info("Bei Fehler 429 bitte mindestens 60 Sekunden warten und die App danach rebooten.")
+    st.stop()
+
+if st.sidebar.button("Daten aus Speicher neu laden"):
+    st.session_state.pop("xing_frame_cache", None)
+    st.session_state.pop("xing_exclusions_cache", None)
+    st.rerun()
+
+# Load from Google only once per browser session. Normal Streamlit widget
+# reruns reuse the in-memory copy and no longer consume Sheets read quota.
+if "xing_frame_cache" not in st.session_state:
+    st.session_state["xing_frame_cache"] = storage.load()
+if "xing_exclusions_cache" not in st.session_state:
+    st.session_state["xing_exclusions_cache"] = storage.load_exclusions()
+
+frame = _migrate_frame(st.session_state["xing_frame_cache"].copy())
+exclusions = set(st.session_state["xing_exclusions_cache"])
 
 # Einmalige Migration älterer Datensätze. Alte Leads dürfen beim ersten V3 Lauf
 # nicht fälschlich als neue Unternehmen des aktuellen Scans erscheinen.
@@ -891,7 +979,7 @@ if not frame.empty:
         frame.loc[legacy_mask, "first_seen_scan"] = "legacy"
         empty_scan_mask = legacy_mask & frame["scan_id"].astype(str).str.strip().eq("")
         frame.loc[empty_scan_mask, "scan_id"] = "legacy"
-        storage.save(frame)
+        persist_frame(frame)
 
 
 if page == "Daily Leads":
@@ -942,7 +1030,7 @@ if page == "Daily Leads":
                 crm_companies, detected_column, row_count = read_company_file(uploaded)
                 st.info(f"Firmenspalte erkannt: {detected_column}. Zeilen: {row_count}.")
                 if st.button("CRM Firmen übernehmen", key="quick_crm_save"):
-                    storage.save_exclusions(set(exclusions) | crm_companies)
+                    persist_exclusions(set(exclusions) | crm_companies)
                     st.success(f"{len(crm_companies)} Firmen übernommen.")
                     st.rerun()
             except Exception as exc:
@@ -1007,7 +1095,7 @@ if page == "Daily Leads":
             )
             merged, inserted, updated = upsert(frame, fresh, scan_id)
             merged = apply_crm_status(merged, exclusions)
-            storage.save(merged)
+            persist_frame(merged)
             frame = merged
             progress.empty()
 
@@ -1047,7 +1135,7 @@ if page == "Daily Leads":
                 openai_model=openai_model,
             )
             enriched = apply_crm_status(enriched, exclusions)
-            storage.save(enriched)
+            persist_frame(enriched)
             frame = enriched
             progress.empty()
             st.success("Nachrecherche abgeschlossen.")
@@ -1229,7 +1317,7 @@ if page == "Daily Leads":
                         frame.loc[idx, "wiedervorlage"] = due_value.isoformat()
                         frame.loc[idx, "notiz"] = note_value
                         frame.loc[idx, "text_locked"] = "ja" if lock_value else ""
-                        storage.save(frame)
+                        persist_frame(frame)
                         st.success("Gespeichert.")
                         st.rerun()
 
@@ -1253,11 +1341,11 @@ elif page == "Follow ups":
                 action_columns = st.columns(2)
                 if action_columns[0].button("In Salesforce übernommen", key=f"sf_{row['lead_id']}"):
                     frame.loc[idx, "status"] = "In Salesforce übernommen"
-                    storage.save(frame)
+                    persist_frame(frame)
                     st.rerun()
                 if action_columns[1].button("Noch drei Tage", key=f"plus3_{row['lead_id']}"):
                     frame.loc[idx, "wiedervorlage"] = (date.today() + timedelta(days=3)).isoformat()
-                    storage.save(frame)
+                    persist_frame(frame)
                     st.rerun()
 
 elif page == "Alle Leads":
@@ -1315,9 +1403,9 @@ elif page == "Salesforce Abgleich":
             st.info(f"Erkannte Firmenspalte: {detected_column}")
             if st.button("Salesforce Firmen dauerhaft abgleichen"):
                 combined = set(exclusions) | crm_companies
-                storage.save_exclusions(combined)
+                persist_exclusions(combined)
                 frame = apply_crm_status(frame, combined)
-                storage.save(frame)
+                persist_frame(frame)
                 st.success(f"{len(crm_companies)} Salesforce Firmen gespeichert.")
                 st.rerun()
         except Exception as exc:
@@ -1329,7 +1417,7 @@ elif page == "CRM Ausschluss":
     manual = st.text_area("Firmen hinzufügen, eine Zeile je Firma")
     if st.button("Firmen speichern"):
         new_items = {normalize_company(value) for value in manual.splitlines() if value.strip()}
-        storage.save_exclusions(set(exclusions) | new_items)
+        persist_exclusions(set(exclusions) | new_items)
         st.success("Ausschlussliste aktualisiert.")
         st.rerun()
     st.write(f"**Aktuell gespeichert:** {len(exclusions)} Firmen")
