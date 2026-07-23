@@ -106,7 +106,10 @@ _SESSION = _session()
 def _clean(value: Any) -> str:
     if value is None:
         return ""
-    return re.sub(r"\s+", " ", BeautifulSoup(str(value), "html.parser").get_text(" ")).strip()
+    text = str(value)
+    if "<" in text and ">" in text:
+        text = BeautifulSoup(text, "html.parser").get_text(" ")
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _get(url: str, params: dict | None = None, timeout: int = 25) -> tuple[requests.Response | None, str]:
@@ -201,6 +204,8 @@ def scan_ba(
     days: int,
     max_pages: int,
     diagnostics: list[str],
+    fetch_details: bool = False,
+    detail_limit: int = 40,
 ) -> list[dict]:
     raw: list[dict] = []
     request_count = 0
@@ -241,7 +246,7 @@ def scan_ba(
     parsed: list[dict] = []
     seen: set[str] = set()
     detail_calls = 0
-    detail_limit = 220
+    detail_limit = max(0, int(detail_limit))
     for item in raw:
         reference = _clean(_first(item, "referenznummer", "refnr", "refNr"))
         if reference and reference in seen:
@@ -256,7 +261,7 @@ def scan_ba(
             continue
 
         details = {}
-        if reference and detail_calls < detail_limit:
+        if fetch_details and reference and detail_calls < detail_limit:
             details = _ba_details(reference, diagnostics)
             detail_calls += 1
         company = _clean(
@@ -290,7 +295,7 @@ def scan_ba(
         ))
     diagnostics.append(
         f"Bundesagentur: {len(parsed)} Stellen aus {request_count} Suchanfragen, "
-        f"{detail_calls} Detailseiten geprüft."
+        f"{detail_calls} Detailseiten geprüft. Schnellmodus: {'aus' if fetch_details else 'an'}."
     )
     return parsed
 
@@ -813,13 +818,19 @@ def scan_jobs(
     serpapi_key: str = "",
     adzuna_app_id: str = "",
     adzuna_api_key: str = "",
+    ba_fetch_details: bool = False,
+    ba_detail_limit: int = 40,
 ) -> tuple[list[dict], list[str]]:
     diagnostics: list[str] = []
     jobs: list[dict] = []
     if "Adzuna" in sources:
         jobs.extend(scan_adzuna(terms, regions, days, max_pages, adzuna_app_id, adzuna_api_key, diagnostics))
     if "Bundesagentur" in sources:
-        jobs.extend(scan_ba(terms, regions, days, max_pages, diagnostics))
+        jobs.extend(scan_ba(
+            terms, regions, days, max_pages, diagnostics,
+            fetch_details=ba_fetch_details,
+            detail_limit=ba_detail_limit,
+        ))
     if "Google Jobs" in sources:
         jobs.extend(scan_google_jobs(terms, regions, days, max_pages, serpapi_key, diagnostics))
     if "Karriereseiten" in sources:
