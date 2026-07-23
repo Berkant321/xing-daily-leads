@@ -125,7 +125,7 @@ def _google_config_signature() -> str:
         client_email,
     ])
 
-KMU_SCHEMA_VERSION = "5.0.0"
+PIPELINE_SCHEMA_VERSION = "5.0.0"
 KMU_REQUIRED_COLUMNS = {
     "lead_segment": "Kleiner Direktkunde",
     "size_fit": "Mittel",
