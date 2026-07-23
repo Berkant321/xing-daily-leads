@@ -665,8 +665,7 @@ if page == "Daily Leads":
         )
 
         uploaded = st.file_uploader(
-            "Optionaler Salesforce Export, vorhandene Firmen werden ausgeschlossen",
-            type=["csv", "xlsx"],
+"Ausgeschlossene Unternehmen"            type=["csv", "xlsx"],
             key="quick_crm_upload_v4",
         )
         if uploaded is not None:
