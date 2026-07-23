@@ -82,6 +82,31 @@ DEFAULT_REGIONS = [
     ("Bremen", 120),
 ]
 
+
+
+def _secret_text(name: str, default: str = "") -> str:
+    """Liest einen Streamlit Secret Wert robust als getrimmten Text."""
+    try:
+        return str(st.secrets.get(name, default) or default).strip()
+    except Exception:
+        return str(default).strip()
+
+
+def _google_config_signature() -> str:
+    """Sorgt dafür, dass Streamlit die gecachte Google Verbindung neu aufbaut,
+    sobald Ziel Sheet oder Service Account geändert werden.
+    """
+    try:
+        account = st.secrets.get("gcp_service_account", {})
+        client_email = str(account.get("client_email", "")).strip() if account else ""
+    except Exception:
+        client_email = ""
+    return "|".join([
+        _secret_text("spreadsheet_id"),
+        _secret_text("spreadsheet_name"),
+        client_email,
+    ])
+
 LOG_COLUMNS = [
     "timestamp",
     "scan_id",
@@ -133,38 +158,84 @@ class Storage:
         self.ws = None
         self.exclusion_ws = None
         self.log_ws = None
+        self.book_title = ""
+        self.book_id = ""
+        self.book_url = ""
         self.row_map: dict[str, int] = {}
         self.next_row = 2
         self.local_path = "leads_local.csv"
         self.local_exclusion_path = "crm_ausschluss_local.csv"
         self.local_log_path = "scan_log_local.csv"
 
+        spreadsheet_id = _secret_text("spreadsheet_id")
+        spreadsheet_name = _secret_text("spreadsheet_name")
+        try:
+            service_account = dict(st.secrets.get("gcp_service_account", {}))
+        except Exception:
+            service_account = {}
+
         configured = bool(
             gspread
-            and "gcp_service_account" in st.secrets
-            and "spreadsheet_name" in st.secrets
+            and Credentials
+            and service_account
+            and (spreadsheet_id or spreadsheet_name)
         )
         if not configured:
             return
 
         try:
             credentials = Credentials.from_service_account_info(
-                dict(st.secrets["gcp_service_account"]),
+                service_account,
                 scopes=[
                     "https://www.googleapis.com/auth/spreadsheets",
                     "https://www.googleapis.com/auth/drive",
                 ],
             )
             client = gspread.authorize(credentials)
-            book = _google_call(client.open, str(st.secrets["spreadsheet_name"]))
+            if spreadsheet_id:
+                book = _google_call(client.open_by_key, spreadsheet_id)
+            else:
+                # Fallback für alte Konfigurationen. Ein Name ist bei mehreren gleichnamigen
+                # Dateien nicht eindeutig, deshalb sollte spreadsheet_id verwendet werden.
+                book = _google_call(client.open, spreadsheet_name)
+
+            self.book_title = book.title
+            self.book_id = book.id
+            self.book_url = f"https://docs.google.com/spreadsheets/d/{book.id}/edit"
             worksheets = {sheet.title: sheet for sheet in _google_call(book.worksheets)}
-            self.ws = self._sheet(book, worksheets, "Leads", 12000, max(70, len(COLUMNS) + 5))
+            self.ws = self._lead_sheet(book, worksheets, 12000, max(70, len(COLUMNS) + 5))
             self.exclusion_ws = self._sheet(book, worksheets, "CRM_Ausschluss", 12000, 5)
             self.log_ws = self._sheet(book, worksheets, "Scan_Log", 12000, len(LOG_COLUMNS) + 2)
             self.mode = "google"
         except Exception as exc:
             self.mode = "google_error"
             self.error = str(exc)
+
+    @staticmethod
+    def _lead_sheet(book, worksheets: dict[str, Any], rows: int, cols: int):
+        """Verwendet genau ein sichtbares Hauptblatt für alle Leads.
+
+        Existiert bereits ein Blatt "Leads", wird es genutzt. Ist nur das leere
+        Standardblatt "Tabelle1" vorhanden, wird dieses in "Leads" umbenannt,
+        statt ein weiteres leeres Blatt anzulegen.
+        """
+        if "Leads" in worksheets:
+            return worksheets["Leads"]
+
+        default_sheet = worksheets.get("Tabelle1") or worksheets.get("Sheet1")
+        if default_sheet is not None:
+            try:
+                values = _google_call(default_sheet.get_all_values)
+                if not values or not any(any(str(cell).strip() for cell in row) for row in values):
+                    old_title = default_sheet.title
+                    _google_call(default_sheet.update_title, "Leads")
+                    worksheets.pop(old_title, None)
+                    worksheets["Leads"] = default_sheet
+                    return default_sheet
+            except Exception:
+                pass
+
+        return Storage._sheet(book, worksheets, "Leads", rows, cols)
 
     @staticmethod
     def _sheet(book, worksheets: dict[str, Any], title: str, rows: int, cols: int):
@@ -335,11 +406,13 @@ class Storage:
 
 
 @st.cache_resource(show_spinner=False)
-def get_storage() -> Storage:
+def get_storage(config_signature: str) -> Storage:
+    # Der Parameter dient ausschließlich zur Cache Invalidierung.
+    _ = config_signature
     return Storage()
 
 
-storage = get_storage()
+storage = get_storage(_google_config_signature())
 
 
 def persist_full(frame: pd.DataFrame) -> None:
@@ -481,6 +554,19 @@ elif storage.mode == "google_error":
 else:
     storage_label = "lokaler Testmodus"
 st.sidebar.write(f"Speicher: {storage_label}")
+if storage.mode == "local" and (
+    "gcp_service_account" in st.secrets
+    or _secret_text("spreadsheet_id")
+    or _secret_text("spreadsheet_name")
+):
+    st.sidebar.warning(
+        "Google Sheets ist nur teilweise konfiguriert. Benötigt werden "
+        "gcp_service_account und spreadsheet_id oder spreadsheet_name."
+    )
+if storage.mode == "google":
+    st.sidebar.caption(f"Verbunden mit: {storage.book_title}")
+    if storage.book_url:
+        st.sidebar.link_button("Verbundenes Google Sheet öffnen", storage.book_url)
 st.sidebar.write(f"OpenAI Paket: {'bereit' if openai_available() else 'fehlt'}")
 st.sidebar.write(f"OpenAI Key: {'hinterlegt' if openai_api_key else 'fehlt'}")
 st.sidebar.write(f"SerpApi: {'hinterlegt' if serpapi_key else 'nicht hinterlegt'}")
@@ -1029,3 +1115,4 @@ elif page == "CRM Ausschluss":
     st.write(f"**Aktuell gespeichert:** {len(exclusions)} Firmen")
     if exclusions:
         st.dataframe(pd.DataFrame({"Firma normalisiert": sorted(exclusions)}), hide_index=True)
+
