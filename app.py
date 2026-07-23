@@ -125,7 +125,7 @@ def _google_config_signature() -> str:
         client_email,
     ])
 
-PIPELINE_SCHEMA_VERSION = "5.0.0"
+KMU_SCHEMA_VERSION = "5.0.1"
 KMU_REQUIRED_COLUMNS = {
     "lead_segment": "Kleiner Direktkunde",
     "size_fit": "Mittel",
@@ -924,7 +924,14 @@ st.sidebar.write(f"OpenAI Paket: {'bereit' if openai_available() else 'fehlt'}")
 st.sidebar.write(f"OpenAI Key: {'hinterlegt' if openai_api_key else 'fehlt'}")
 st.sidebar.write(f"SerpApi: {'hinterlegt' if serpapi_key else 'nicht hinterlegt'}")
 st.sidebar.write(f"Adzuna: {'bereit' if adzuna_app_id and adzuna_api_key else 'Zugangsdaten fehlen'}")
-st.sidebar.caption(f"KMU Schema: {KMU_SCHEMA_VERSION} · Pipeline: {getattr(pipeline_module, 'PIPELINE_SCHEMA_VERSION', 'älter')}")
+active_schema_version = globals().get(
+    "KMU_SCHEMA_VERSION",
+    getattr(pipeline_module, "PIPELINE_SCHEMA_VERSION", "5.0.1"),
+)
+st.sidebar.caption(
+    f"KMU Schema: {active_schema_version} · "
+    f"Pipeline: {getattr(pipeline_module, 'PIPELINE_SCHEMA_VERSION', 'älter')}"
+)
 st.sidebar.caption("Google Sheets Tabs: Leads · Stellen · CRM_Ausschluss · Scan_Log")
 
 if storage.mode == "google_error":

@@ -14,8 +14,10 @@ from research import normalize_company as research_normalize_company
 from research import research_company
 from sales_ai import ASSET_KEYS, create_sales_assets
 
-PIPELINE_SCHEMA_VERSION = "5.0.0"
-
+st.sidebar.caption(
+    f"KMU Schema: {KMU_SCHEMA_VERSION} · Pipeline: "
+    f"{getattr(pipeline_module, 'PIPELINE_SCHEMA_VERSION', 'älter')}"
+)
 
 BENEFIT_PATTERNS = {
     "Homeoffice": [r"\bhomeoffice\b", r"\bremote\b", r"mobiles arbeiten"],
