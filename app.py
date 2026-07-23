@@ -9,12 +9,14 @@ import pandas as pd
 import streamlit as st
 
 from pipeline import (
+    ASSET_KEYS,
     COLUMNS,
     STATUSES,
     ai_candidate_indices,
     apply_crm_status,
     build_discovery_leads,
     clean_text,
+    crm_match,
     enrich_lead,
     generate_lead_assets,
     migrate_frame,
@@ -40,46 +42,46 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.markdown(
-    """
-    <style>
-    html, body, [class*="css"], [data-testid="stAppViewContainer"] {
-        font-family: Arial, sans-serif !important;
-        font-size: 11.5pt;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
-
-DEFAULT_SEARCH_TERMS = [
-    "Physiotherapeut",
-    "Ergotherapeut",
-    "Logopäde",
-    "Pflegefachkraft",
-    "Medizinische Fachangestellte",
-    "Steuerfachangestellte",
-    "Steuerfachwirt",
-    "Bilanzbuchhalter",
-    "Elektroniker",
-    "Mechatroniker",
-    "Anlagenmechaniker",
-    "Servicetechniker",
-    "Industriemechaniker",
-    "Schweißer",
-    "Bauleiter",
-    "Projektingenieur",
-    "Konstrukteur",
-    "Softwareentwickler",
-    "Systemadministrator",
-    "DevOps Engineer",
-    "Vertriebsmitarbeiter",
-    "Account Manager",
-    "Controller",
-    "Berufskraftfahrer",
-    "Disponent",
-]
+CAMPAIGN_PRESETS = {
+    "Alle kleinen Direktkunden": [
+        "Physiotherapeut", "Ergotherapeut", "Logopäde",
+        "Steuerfachangestellte", "Steuerfachwirt", "Bilanzbuchhalter",
+        "Pflegefachkraft ambulant", "Medizinische Fachangestellte",
+        "Elektroniker", "Mechatroniker", "Anlagenmechaniker SHK",
+        "Servicetechniker", "Bauleiter", "Projektingenieur", "Konstrukteur",
+        "Softwareentwickler", "Systemadministrator",
+    ],
+    "Therapiepraxen": [
+        "Physiotherapeut", "Ergotherapeut", "Logopäde", "Sprachtherapeut",
+        "Praxisleitung Therapie", "Therapeutische Leitung",
+    ],
+    "Steuerkanzleien": [
+        "Steuerfachangestellte", "Steuerfachwirt", "Bilanzbuchhalter",
+        "Lohnbuchhalter", "Finanzbuchhalter", "Steuerberater",
+    ],
+    "Ambulante Pflege": [
+        "Pflegefachkraft ambulant", "Pflegedienstleitung ambulant",
+        "Pflegefachassistent", "Altenpfleger ambulant", "Tourenpflege",
+    ],
+    "Arztpraxen": [
+        "Medizinische Fachangestellte", "MFA", "Zahnmedizinische Fachangestellte",
+        "Praxismanager", "Praxisleitung",
+    ],
+    "Handwerk und Technik": [
+        "Elektroniker", "Mechatroniker", "Anlagenmechaniker SHK",
+        "Servicetechniker", "Industriemechaniker", "Schweißer",
+        "Tischler", "Metallbauer", "Kältetechniker",
+    ],
+    "Kleine Ingenieurbüros": [
+        "Bauleiter", "Projektingenieur", "Konstrukteur", "TGA Planer",
+        "Elektroingenieur", "Versorgungsingenieur", "Projektleiter Bau",
+    ],
+    "Kleine IT Unternehmen": [
+        "Softwareentwickler", "Systemadministrator", "DevOps Engineer",
+        "IT Support", "IT Administrator",
+    ],
+}
 
 DEFAULT_REGIONS = [
     ("Münster", 120),
@@ -91,6 +93,31 @@ DEFAULT_REGIONS = [
     ("Hannover", 120),
     ("Bremen", 120),
 ]
+
+
+
+def _secret_text(name: str, default: str = "") -> str:
+    """Liest einen Streamlit Secret Wert robust als getrimmten Text."""
+    try:
+        return str(st.secrets.get(name, default) or default).strip()
+    except Exception:
+        return str(default).strip()
+
+
+def _google_config_signature() -> str:
+    """Sorgt dafür, dass Streamlit die gecachte Google Verbindung neu aufbaut,
+    sobald Ziel Sheet oder Service Account geändert werden.
+    """
+    try:
+        account = st.secrets.get("gcp_service_account", {})
+        client_email = str(account.get("client_email", "")).strip() if account else ""
+    except Exception:
+        client_email = ""
+    return "|".join([
+        _secret_text("spreadsheet_id"),
+        _secret_text("spreadsheet_name"),
+        client_email,
+    ])
 
 LOG_COLUMNS = [
     "timestamp",
@@ -105,71 +132,47 @@ LOG_COLUMNS = [
     "message",
 ]
 
-COMPANY_ALIASES = [
-    "account name",
-    "account",
-    "firmenname",
-    "firma",
-    "unternehmen",
-    "unternehmensname",
-    "company",
-    "company name",
-    "name des accounts",
-    "kunde",
-    "kundenname",
-    "arbeitgeber",
-]
 
-STATE_ALIASES = [
-    "bundesland",
-    "bundeslaender",
-    "bundesländer",
-    "region",
-    "state",
-    "gebiet",
-    "land",
-]
-
-
-def _secret_text(name: str, default: str = "") -> str:
+def _google_error_meta(exc: Exception) -> tuple[int | None, int | None, str]:
+    """Liest Statuscode und Retry-After robust aus gspread/requests Fehlern."""
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    retry_after = None
     try:
-        return str(st.secrets.get(name, default) or default).strip()
+        header_value = response.headers.get("Retry-After") if response is not None else None
+        retry_after = int(header_value) if header_value else None
     except Exception:
-        return str(default).strip()
-
-
-def _google_config_signature() -> str:
-    try:
-        account = st.secrets.get("gcp_service_account", {})
-        client_email = str(account.get("client_email", "")).strip() if account else ""
-    except Exception:
-        client_email = ""
-    return "|".join(
-        [
-            _secret_text("spreadsheet_id"),
-            _secret_text("spreadsheet_name"),
-            client_email,
-        ]
-    )
+        retry_after = None
+    return status, retry_after, str(exc)
 
 
 def _google_call(func, *args, **kwargs):
-    delays = (0, 3, 8, 20)
+    """Google-Aufruf mit belastbarem Backoff für Quota- und Serverfehler.
+
+    429-Fehler werden bis zu rund einer Minute lang erneut versucht. Dauerhafte
+    Fehler wie fehlende Rechte oder ein falsches Sheet werden sofort weitergegeben.
+    """
+    waits = (2, 5, 15, 40)
     last_error = None
-    for delay in delays:
-        if delay:
-            time.sleep(delay)
+    for attempt in range(len(waits) + 1):
         try:
             return func(*args, **kwargs)
         except Exception as exc:
             last_error = exc
-            message = str(exc).lower()
-            temporary = any(
-                marker in message
-                for marker in ("429", "quota exceeded", "resource_exhausted", "503")
+            status, retry_after, message = _google_error_meta(exc)
+            low = message.lower()
+            temporary = (
+                status in {429, 500, 502, 503, 504}
+                or "429" in low
+                or "quota exceeded" in low
+                or "resource_exhausted" in low
+                or "rate limit" in low
+                or "503" in low
             )
-            if not temporary:
+            if not temporary or attempt >= len(waits):
                 raise
+            wait_seconds = max(waits[attempt], retry_after or 0)
+            time.sleep(wait_seconds)
     raise last_error
 
 
@@ -179,19 +182,6 @@ def _column_letter(number: int) -> str:
         number, remainder = divmod(number - 1, 26)
         result = chr(65 + remainder) + result
     return result
-
-
-def _safe_series(frame: pd.DataFrame, column: str) -> pd.Series:
-    if column in frame.columns:
-        return frame[column].astype(str)
-    return pd.Series([""] * len(frame), index=frame.index, dtype=str)
-
-
-def _value(row: pd.Series, column: str, default: str = "") -> str:
-    value = row.get(column, default)
-    if value is None or pd.isna(value):
-        return default
-    return str(value)
 
 
 class Storage:
@@ -206,6 +196,7 @@ class Storage:
         self.book_url = ""
         self.row_map: dict[str, int] = {}
         self.next_row = 2
+        self._exclusions_cache: set[str] | None = None
         self.local_path = "leads_local.csv"
         self.local_exclusion_path = "crm_ausschluss_local.csv"
         self.local_log_path = "scan_log_local.csv"
@@ -238,6 +229,8 @@ class Storage:
             if spreadsheet_id:
                 book = _google_call(client.open_by_key, spreadsheet_id)
             else:
+                # Fallback für alte Konfigurationen. Ein Name ist bei mehreren gleichnamigen
+                # Dateien nicht eindeutig, deshalb sollte spreadsheet_id verwendet werden.
                 book = _google_call(client.open, spreadsheet_name)
 
             self.book_title = book.title
@@ -245,28 +238,8 @@ class Storage:
             self.book_url = f"https://docs.google.com/spreadsheets/d/{book.id}/edit"
             worksheets = {sheet.title: sheet for sheet in _google_call(book.worksheets)}
             self.ws = self._lead_sheet(book, worksheets, 12000, max(70, len(COLUMNS) + 5))
-
-            existing_exclusion = (
-                worksheets.get("Ausgeschlossene Unternehmen")
-                or worksheets.get("CRM_Ausschluss")
-                or worksheets.get("CRM Ausschluss")
-            )
-            if existing_exclusion is None:
-                existing_exclusion = self._sheet(
-                    book,
-                    worksheets,
-                    "Ausgeschlossene Unternehmen",
-                    12000,
-                    5,
-                )
-            self.exclusion_ws = existing_exclusion
-            self.log_ws = self._sheet(
-                book,
-                worksheets,
-                "Scan_Log",
-                12000,
-                len(LOG_COLUMNS) + 2,
-            )
+            self.exclusion_ws = self._sheet(book, worksheets, "CRM_Ausschluss", 12000, 5)
+            self.log_ws = self._sheet(book, worksheets, "Scan_Log", 12000, len(LOG_COLUMNS) + 2)
             self.mode = "google"
         except Exception as exc:
             self.mode = "google_error"
@@ -274,6 +247,12 @@ class Storage:
 
     @staticmethod
     def _lead_sheet(book, worksheets: dict[str, Any], rows: int, cols: int):
+        """Verwendet genau ein sichtbares Hauptblatt für alle Leads.
+
+        Existiert bereits ein Blatt "Leads", wird es genutzt. Ist nur das leere
+        Standardblatt "Tabelle1" vorhanden, wird dieses in "Leads" umbenannt,
+        statt ein weiteres leeres Blatt anzulegen.
+        """
         if "Leads" in worksheets:
             return worksheets["Leads"]
 
@@ -281,10 +260,7 @@ class Storage:
         if default_sheet is not None:
             try:
                 values = _google_call(default_sheet.get_all_values)
-                is_empty = not values or not any(
-                    any(str(cell).strip() for cell in row) for row in values
-                )
-                if is_empty:
+                if not values or not any(any(str(cell).strip() for cell in row) for row in values):
                     old_title = default_sheet.title
                     _google_call(default_sheet.update_title, "Leads")
                     worksheets.pop(old_title, None)
@@ -378,18 +354,15 @@ class Storage:
         updates: list[dict[str, Any]] = []
         append_values: list[list[str]] = []
         append_ids: list[str] = []
-
         for _, row in rows.iterrows():
             values = [str(row[column] or "") for column in COLUMNS]
             lead = row["lead_id"]
             if lead in self.row_map:
                 sheet_row = self.row_map[lead]
-                updates.append(
-                    {
-                        "range": f"A{sheet_row}:{end_column}{sheet_row}",
-                        "values": [values],
-                    }
-                )
+                updates.append({
+                    "range": f"A{sheet_row}:{end_column}{sheet_row}",
+                    "values": [values],
+                })
             else:
                 append_values.append(values)
                 append_ids.append(lead)
@@ -403,6 +376,8 @@ class Storage:
                     self.row_map[lead] = self.next_row
                     self.next_row += 1
         except Exception:
+            # Ein kompletter Fallback ist langsamer, aber verhindert Datenverlust,
+            # falls sich die gspread Signatur ändert oder ein Batch fehlschlägt.
             self.save(full_frame)
 
     def load_exclusions(self) -> set[str]:
@@ -411,39 +386,68 @@ class Storage:
         if self.mode == "local":
             try:
                 frame = pd.read_csv(self.local_exclusion_path, dtype=str).fillna("")
-                return {
-                    normalize_company(value)
-                    for value in frame.get("firma", [])
-                    if value
-                }
+                result = {normalize_company(value) for value in frame.get("firma", []) if value}
             except FileNotFoundError:
-                return set()
+                result = set()
+            self._exclusions_cache = set(result)
+            return result
 
-        values = _google_call(self.exclusion_ws.get_all_records)
-        return {
-            normalize_company(row.get("firma", ""))
-            for row in values
-            if row.get("firma")
-        }
-
-    def save_exclusions(self, companies: set[str]) -> None:
-        rows = sorted(
-            {
-                normalize_company(company)
-                for company in companies
-                if normalize_company(company)
+        values = _google_call(self.exclusion_ws.get_all_values)
+        if not values:
+            _google_call(self.exclusion_ws.update_acell, "A1", "firma")
+            result: set[str] = set()
+        else:
+            first_cell = clean_text(values[0][0] if values[0] else "").lower()
+            start_index = 1 if first_cell == "firma" else 0
+            if first_cell != "firma":
+                _google_call(self.exclusion_ws.insert_row, ["firma"], 1)
+                start_index = 0
+            result = {
+                normalize_company(row[0])
+                for row in values[start_index:]
+                if row and normalize_company(row[0])
             }
-        )
+        self._exclusions_cache = set(result)
+        return result
+
+    def save_exclusions(self, companies: set[str]) -> set[str]:
+        """Speichert Ausschlüsse additiv statt das ganze Blatt neu zu schreiben.
+
+        Die Ausschlussliste ist absichtlich monoton: Neue Firmen werden in einem
+        einzigen Batch angehängt. Dadurch entstehen weder Clear-Requests noch ein
+        vollständiges Rewrite bei jedem einzelnen Klick.
+        """
+        target = {
+            normalize_company(company)
+            for company in companies
+            if normalize_company(company)
+        }
         if self.mode == "google_error":
             raise RuntimeError(self.error or "Google Sheets ist nicht verbunden.")
         if self.mode == "local":
-            pd.DataFrame({"firma": rows}).to_csv(
-                self.local_exclusion_path,
-                index=False,
+            existing = self._exclusions_cache if self._exclusions_cache is not None else self.load_exclusions()
+            combined = set(existing) | target
+            pd.DataFrame({"firma": sorted(combined)}).to_csv(self.local_exclusion_path, index=False)
+            self._exclusions_cache = combined
+            return combined
+
+        existing = self._exclusions_cache if self._exclusions_cache is not None else self.load_exclusions()
+        additions = sorted(target - existing)
+        if not additions:
+            return set(existing)
+
+        rows = [[company] for company in additions]
+        for start in range(0, len(rows), 500):
+            _google_call(
+                self.exclusion_ws.append_rows,
+                rows[start : start + 500],
+                value_input_option="RAW",
+                insert_data_option="INSERT_ROWS",
             )
-            return
-        _google_call(self.exclusion_ws.clear)
-        _google_call(self.exclusion_ws.update, [["firma"]] + [[company] for company in rows])
+
+        combined = set(existing) | set(additions)
+        self._exclusions_cache = combined
+        return combined
 
     def load_logs(self) -> pd.DataFrame:
         if self.mode == "google_error":
@@ -479,6 +483,7 @@ class Storage:
 
 @st.cache_resource(show_spinner=False)
 def get_storage(config_signature: str) -> Storage:
+    # Der Parameter dient ausschließlich zur Cache Invalidierung.
     _ = config_signature
     return Storage()
 
@@ -499,126 +504,77 @@ def persist_rows(rows: pd.DataFrame, frame: pd.DataFrame) -> None:
     st.session_state["xing_frame_cache"] = frame.copy()
 
 
-def persist_exclusions(companies: set[str]) -> None:
-    normalized = {
-        normalize_company(company)
-        for company in companies
-        if normalize_company(company)
-    }
-    storage.save_exclusions(normalized)
-    st.session_state["xing_exclusions_cache"] = set(normalized)
+def persist_exclusions(companies: set[str]) -> set[str]:
+    normalized = {normalize_company(company) for company in companies if normalize_company(company)}
+    persisted = storage.save_exclusions(normalized)
+    st.session_state["xing_exclusions_cache"] = set(persisted)
+    return set(persisted)
+
+
+def _google_action_error(exc: Exception) -> str:
+    status, _, message = _google_error_meta(exc)
+    if status == 429 or "429" in message or "quota" in message.lower():
+        return "Google Sheets ist gerade am Minutenlimit. Die App hat automatisch erneut versucht. Bitte etwa eine Minute warten und den Klick einmal wiederholen."
+    if status == 403 or "403" in message:
+        return "Google Sheets verweigert den Schreibzugriff. Prüfe, ob die Service Account E Mail im Sheet die Rolle Mitarbeiter hat."
+    if status == 404 or "404" in message:
+        return "Das verbundene Google Sheet oder das Tabellenblatt CRM_Ausschluss wurde nicht gefunden."
+    return f"Google Sheets konnte die Änderung nicht speichern: {message}"
 
 
 def append_log(**kwargs) -> None:
     record = {column: "" for column in LOG_COLUMNS}
     record.update(kwargs)
-    record["timestamp"] = record.get("timestamp") or datetime.now(
-        timezone.utc
-    ).isoformat(timespec="seconds")
+    record["timestamp"] = record.get("timestamp") or datetime.now(timezone.utc).isoformat(timespec="seconds")
     storage.append_log(record)
-    logs = st.session_state.get(
-        "xing_logs_cache",
-        pd.DataFrame(columns=LOG_COLUMNS),
-    ).copy()
+    logs = st.session_state.get("xing_logs_cache", pd.DataFrame(columns=LOG_COLUMNS)).copy()
     logs.loc[len(logs)] = [record.get(column, "") for column in LOG_COLUMNS]
     st.session_state["xing_logs_cache"] = logs
-
-
-def _read_csv_bytes(raw: bytes) -> pd.DataFrame:
-    for encoding in ("utf8", "utf8 sig", "latin1"):
-        python_encoding = {
-            "utf8": "utf-8",
-            "utf8 sig": "utf-8-sig",
-            "latin1": "latin1",
-        }[encoding]
-        try:
-            return pd.read_csv(
-                pd.io.common.BytesIO(raw),
-                dtype=str,
-                sep=None,
-                engine="python",
-                encoding=python_encoding,
-            ).fillna("")
-        except Exception:
-            continue
-    raise ValueError("Die CSV Datei konnte nicht gelesen werden.")
 
 
 def read_company_file(uploaded_file):
     name = uploaded_file.name.lower()
     if name.endswith(".xlsx"):
         frame = pd.read_excel(uploaded_file, dtype=str).fillna("")
-    elif name.endswith(".csv"):
-        frame = _read_csv_bytes(uploaded_file.getvalue())
     else:
-        raise ValueError("Bitte eine CSV oder XLSX Datei hochladen.")
+        raw = uploaded_file.getvalue()
+        frame = None
+        for encoding in ("utf-8-sig", "utf-8", "latin1"):
+            try:
+                frame = pd.read_csv(
+                    pd.io.common.BytesIO(raw),
+                    dtype=str,
+                    sep=None,
+                    engine="python",
+                    encoding=encoding,
+                ).fillna("")
+                break
+            except Exception:
+                continue
+        if frame is None:
+            raise ValueError("CSV konnte nicht gelesen werden.")
 
-    if frame.empty:
-        raise ValueError("Die Datei enthält keine Daten.")
-
-    normalized_columns = {
-        normalize_company(column): column for column in frame.columns
-    }
-
+    aliases = [
+        "account name", "account", "firmenname", "firma", "unternehmen",
+        "company", "name des accounts", "kunde", "kundenname",
+    ]
+    normalized_columns = {normalize_company(column): column for column in frame.columns}
     company_column = next(
         (
             original
             for normalized, original in normalized_columns.items()
-            if any(alias in normalized for alias in COMPANY_ALIASES)
+            if any(alias in normalized for alias in aliases)
         ),
         None,
     )
-
-    if company_column is None and len(frame.columns) == 1:
-        company_column = frame.columns[0]
-
     if not company_column:
-        raise ValueError(
-            "Keine Unternehmensspalte erkannt. Nutze zum Beispiel Firma, Unternehmen oder Account Name."
-        )
-
-    state_column = next(
-        (
-            original
-            for normalized, original in normalized_columns.items()
-            if any(alias in normalized for alias in STATE_ALIASES)
-        ),
-        None,
-    )
-
-    original_names = [
-        clean_text(value)
-        for value in frame[company_column].astype(str)
-        if clean_text(value)
-    ]
+        raise ValueError("Keine Firmenspalte erkannt. Nutze zum Beispiel Account Name, Firma oder Unternehmen.")
     companies = {
         normalize_company(value)
-        for value in original_names
+        for value in frame[company_column].astype(str)
         if normalize_company(value)
     }
-
-    if not companies:
-        raise ValueError("In der erkannten Unternehmensspalte stehen keine Firmennamen.")
-
-    preview_columns = [company_column]
-    if state_column and state_column != company_column:
-        preview_columns.append(state_column)
-    preview = frame[preview_columns].head(12).copy()
-
-    return {
-        "companies": companies,
-        "company_column": company_column,
-        "state_column": state_column,
-        "row_count": len(frame),
-        "preview": preview,
-    }
-
-
-def import_exclusion_file(uploaded_file, current_exclusions: set[str]) -> int:
-    result = read_company_file(uploaded_file)
-    new_companies = result["companies"] - current_exclusions
-    persist_exclusions(current_exclusions | result["companies"])
-    return len(new_companies)
+    return companies, company_column, len(frame)
 
 
 def parse_regions(text: str) -> list[tuple[str, int]]:
@@ -648,11 +604,7 @@ def next_term_batch(terms: list[str], batch_size: int, logs: pd.DataFrame) -> li
             & (logs["processed_terms"] != "")
         ]
         if not search_logs.empty:
-            last_terms = [
-                term.strip()
-                for term in search_logs.iloc[-1]["processed_terms"].split("|")
-                if term.strip()
-            ]
+            last_terms = [term.strip() for term in search_logs.iloc[-1]["processed_terms"].split("|") if term.strip()]
             if last_terms and last_terms[-1] in terms:
                 start = (terms.index(last_terms[-1]) + 1) % len(terms)
     rotated = terms[start:] + terms[:start]
@@ -664,75 +616,22 @@ def latest_scan_id(frame: pd.DataFrame) -> str:
         return ""
     scan_ids = [
         str(value)
-        for value in _safe_series(frame, "scan_id").unique().tolist()
+        for value in frame["scan_id"].unique().tolist()
         if re.fullmatch(r"\d{8}T\d{6}Z", str(value or ""))
     ]
     return max(scan_ids) if scan_ids else ""
 
 
-def exclusion_upload_block(
-    title: str,
-    key_prefix: str,
-    current_exclusions: set[str],
-) -> set[str]:
-    st.markdown(f"#### {title}")
-    st.caption(
-        "Lade eine CSV oder XLSX Datei hoch. Die Unternehmensspalte wird automatisch erkannt. "
-        "Eine Bundeslandspalte darf zusätzlich enthalten sein."
-    )
-    uploaded = st.file_uploader(
-        "Datei mit ausgeschlossenen Unternehmen",
-        type=["csv", "xlsx"],
-        key=f"{key_prefix}_upload",
-    )
-    if uploaded is None:
-        return current_exclusions
+openai_api_key = str(st.secrets.get("openai_api_key", "")).strip()
+openai_model = str(st.secrets.get("openai_model", "gpt-5-mini")).strip() or "gpt-5-mini"
+serpapi_key = str(st.secrets.get("serpapi_key", "")).strip()
+adzuna_app_id = str(st.secrets.get("adzuna_app_id", "")).strip()
+adzuna_api_key = str(st.secrets.get("adzuna_api_key", "")).strip()
 
-    try:
-        result = read_company_file(uploaded)
-        state_text = (
-            f" Bundeslandspalte erkannt: {result['state_column']}."
-            if result["state_column"]
-            else " Keine Bundeslandspalte erforderlich."
-        )
-        st.info(
-            f"Unternehmensspalte erkannt: {result['company_column']}. "
-            f"Zeilen: {result['row_count']}.{state_text}"
-        )
-        st.dataframe(result["preview"], use_container_width=True, hide_index=True)
-        if st.button(
-            "Unternehmen ausschließen",
-            type="primary",
-            key=f"{key_prefix}_save",
-        ):
-            new_count = len(result["companies"] - current_exclusions)
-            merged = current_exclusions | result["companies"]
-            persist_exclusions(merged)
-            st.success(
-                f"{new_count} neue Unternehmen gespeichert. Insgesamt sind {len(merged)} Unternehmen ausgeschlossen."
-            )
-            st.rerun()
-    except Exception as exc:
-        st.error(str(exc))
-
-    return current_exclusions
-
-
-openai_api_key = _secret_text("openai_api_key")
-openai_model = _secret_text("openai_model", "gpt-5-mini") or "gpt-5-mini"
-serpapi_key = _secret_text("serpapi_key")
-adzuna_app_id = _secret_text("adzuna_app_id")
-adzuna_api_key = _secret_text("adzuna_api_key")
-
-st.sidebar.title("XING Daily Leads")
+st.sidebar.title("XING Daily Leads V4.4 KMU")
 page = st.sidebar.radio(
     "Bereich",
-    [
-        "Daily Leads",
-        "Follow ups",
-        "Alle Leads",
-        "Ausgeschlossene Unternehmen",
-    ],
+    ["Daily Leads", "Follow ups", "Alle Leads", "Salesforce Abgleich", "CRM Ausschluss"],
 )
 
 st.sidebar.markdown("### Systemcheck")
@@ -743,7 +642,6 @@ elif storage.mode == "google_error":
 else:
     storage_label = "lokaler Testmodus"
 st.sidebar.write(f"Speicher: {storage_label}")
-
 if storage.mode == "local" and (
     "gcp_service_account" in st.secrets
     or _secret_text("spreadsheet_id")
@@ -753,18 +651,14 @@ if storage.mode == "local" and (
         "Google Sheets ist nur teilweise konfiguriert. Benötigt werden "
         "gcp_service_account und spreadsheet_id oder spreadsheet_name."
     )
-
 if storage.mode == "google":
     st.sidebar.caption(f"Verbunden mit: {storage.book_title}")
     if storage.book_url:
         st.sidebar.link_button("Verbundenes Google Sheet öffnen", storage.book_url)
-
 st.sidebar.write(f"OpenAI Paket: {'bereit' if openai_available() else 'fehlt'}")
 st.sidebar.write(f"OpenAI Key: {'hinterlegt' if openai_api_key else 'fehlt'}")
 st.sidebar.write(f"SerpApi: {'hinterlegt' if serpapi_key else 'nicht hinterlegt'}")
-st.sidebar.write(
-    f"Adzuna: {'bereit' if adzuna_app_id and adzuna_api_key else 'Zugangsdaten fehlen'}"
-)
+st.sidebar.write(f"Adzuna: {'bereit' if adzuna_app_id and adzuna_api_key else 'Zugangsdaten fehlen'}")
 
 if storage.mode == "google_error":
     st.error(
@@ -791,139 +685,105 @@ exclusions = set(st.session_state["xing_exclusions_cache"])
 logs = st.session_state["xing_logs_cache"].copy()
 
 if not frame.empty:
-    legacy_mask = _safe_series(frame, "first_seen_scan").str.strip().eq("")
+    legacy_mask = frame["first_seen_scan"].astype(str).str.strip().eq("")
     if legacy_mask.any():
         frame.loc[legacy_mask, "first_seen_scan"] = "legacy"
-        empty_scan = legacy_mask & _safe_series(frame, "scan_id").str.strip().eq("")
-        frame.loc[empty_scan, "scan_id"] = "legacy"
+        frame.loc[legacy_mask & frame["scan_id"].astype(str).str.strip().eq(""), "scan_id"] = "legacy"
         persist_full(frame)
 
 
 if page == "Daily Leads":
     st.title("Daily Leads")
-    st.caption(
-        "Drei getrennte Schritte. Jeder fertige Teil wird sofort gespeichert."
-    )
+    st.caption("KMU Fokus: kleine Praxen, Kanzleien, Pflegedienste, Handwerksbetriebe und Ingenieurbüros werden vor großen Arbeitgebern priorisiert.")
 
-    research_pending = (
-        len(research_candidate_indices(frame, max(1, len(frame))))
-        if not frame.empty
-        else 0
-    )
-    ai_pending = (
-        len(ai_candidate_indices(frame, max(1, len(frame))))
-        if not frame.empty
-        else 0
-    )
+    research_pending = len(research_candidate_indices(frame, max(1, len(frame)))) if not frame.empty else 0
+    ai_pending = len(ai_candidate_indices(frame, max(1, len(frame)))) if not frame.empty else 0
     ready_mask = (
-        ((_safe_series(frame, "email") != "") | (_safe_series(frame, "telefon") != ""))
-        & (_safe_series(frame, "call_opener") != "")
-        & (_safe_series(frame, "erstmail") != "")
-        if not frame.empty
-        else pd.Series(dtype=bool)
-    )
+        ((frame["email"] != "") | (frame["telefon"] != ""))
+        & (frame["call_opener"] != "")
+        & (frame["erstmail"] != "")
+    ) if not frame.empty else pd.Series(dtype=bool)
 
-    metric_columns = st.columns(4)
+    metric_columns = st.columns(5)
     metric_columns[0].metric("Gespeicherte Firmen", len(frame))
-    metric_columns[1].metric("Recherche offen", research_pending)
-    metric_columns[2].metric("Texte offen", ai_pending)
-    metric_columns[3].metric(
-        "Verkaufsbereit",
-        int(ready_mask.sum()) if not frame.empty else 0,
-    )
+    small_count = int((frame["size_fit"] == "Klein").sum()) if not frame.empty else 0
+    metric_columns[1].metric("Kleine Direktkunden", small_count)
+    metric_columns[2].metric("Recherche offen", research_pending)
+    metric_columns[3].metric("Texte offen", ai_pending)
+    metric_columns[4].metric("Verkaufsbereit", int(ready_mask.sum()) if not frame.empty else 0)
 
-    with st.expander(
-        "Schritt 1: Stellen finden und Firmen sofort speichern",
-        expanded=frame.empty,
-    ):
+    with st.expander("Schritt 1: Stellen finden und Firmen sofort speichern", expanded=frame.empty):
         st.write(
-            "Dieser Schritt sucht Stellen und speichert jede fertige Suchrunde sofort. "
-            "Website Recherche und OpenAI starten erst in den nächsten Schritten."
+            "Dieser Schritt sucht nur Stellen und speichert jede fertige Suchrunde sofort. "
+            "Website Recherche und OpenAI laufen hier bewusst noch nicht."
+        )
+        campaign = st.selectbox(
+            "Zielkunden Kampagne",
+            list(CAMPAIGN_PRESETS.keys()),
+            index=0,
+            key="campaign_v44",
+            help="Der Scanner filtert nicht nur nach Beruf, sondern auch nach kleiner Unternehmensstruktur.",
         )
         terms_text = st.text_area(
             "Suchbegriffe, eine Zeile je Begriff",
-            "\n".join(DEFAULT_SEARCH_TERMS),
-            key="terms_v5",
+            "\n".join(CAMPAIGN_PRESETS[campaign]),
+            key=f"terms_v44_{campaign}",
         )
         regions_text = st.text_area(
             "Regionen im Format Ort,Umkreis",
             "\n".join(f"{city},{radius}" for city, radius in DEFAULT_REGIONS),
-            key="regions_v5",
+            key="regions_v4",
         )
 
         source_columns = st.columns(4)
-        use_adzuna = source_columns[0].checkbox(
-            "Adzuna",
-            value=bool(adzuna_app_id and adzuna_api_key),
-            key="source_adzuna_v5",
-        )
-        use_ba = source_columns[1].checkbox(
-            "Bundesagentur",
-            value=True,
-            key="source_ba_v5",
-        )
-        use_google = source_columns[2].checkbox(
-            "Google Jobs",
-            value=False,
-            key="source_google_v5",
-        )
-        use_careers = source_columns[3].checkbox(
-            "Karriereseiten",
-            value=False,
-            key="source_careers_v5",
-        )
+        use_adzuna = source_columns[0].checkbox("Adzuna", value=bool(adzuna_app_id and adzuna_api_key), key="source_adzuna_v4")
+        use_ba = source_columns[1].checkbox("Bundesagentur", value=True, key="source_ba_v4")
+        use_google = source_columns[2].checkbox("Google Jobs", value=False, key="source_google_v4")
+        use_careers = source_columns[3].checkbox("Karriereseiten", value=False, key="source_careers_v4")
 
         career_urls_text = st.text_area(
-            "Optionale Karriereseiten oder ATS Boards, eine URL je Zeile",
+            "Optionale echte Karriereseiten oder ATS Boards, eine URL je Zeile",
             placeholder=(
                 "https://firma.jobs.personio.de\n"
                 "https://boards.greenhouse.io/firma\n"
                 "https://jobs.lever.co/firma\n"
                 "https://firma.de/karriere"
             ),
-            key="career_urls_v5",
+            key="career_urls_v4",
         )
 
         settings_columns = st.columns(3)
-        days = settings_columns[0].number_input(
-            "Veröffentlicht seit Tagen",
-            1,
-            30,
-            14,
-            key="days_v5",
-        )
-        max_pages = settings_columns[1].number_input(
-            "Seiten je Suche",
-            1,
-            3,
-            1,
-            key="pages_v5",
-        )
-        term_batch_size = settings_columns[2].number_input(
-            "Suchbegriffe pro Klick",
-            1,
-            5,
-            2,
-            key="term_batch_v5",
-        )
+        days = settings_columns[0].number_input("Veröffentlicht seit Tagen", 1, 30, 14, key="days_v4")
+        max_pages = settings_columns[1].number_input("Seiten je Suche", 1, 3, 1, key="pages_v4")
+        term_batch_size = settings_columns[2].number_input("Suchbegriffe pro Klick", 1, 5, 2, key="term_batch_v4")
 
         all_terms = [line.strip() for line in terms_text.splitlines() if line.strip()]
         upcoming_terms = next_term_batch(all_terms, int(term_batch_size), logs)
-        st.info(
-            "Nächste Suchrunde: "
-            + (", ".join(upcoming_terms) if upcoming_terms else "keine Begriffe")
-        )
+        st.info("Nächste Suchrunde: " + (", ".join(upcoming_terms) if upcoming_terms else "keine Begriffe"))
         st.caption(
-            "Die Bundesagentur läuft im Schnellmodus. Kontakte werden anschließend in Schritt 2 recherchiert."
+            "Standardmäßig werden Unternehmen mit mehr als acht Stellen, mehr als drei Standorten, "
+            "Kettenstrukturen oder stark gemischten Rollen aussortiert. Kontakte folgen in Schritt 2."
         )
 
-        exclusions = exclusion_upload_block(
-            "Ausgeschlossene Unternehmen",
-            "daily_exclusions_v5",
-            exclusions,
+        uploaded = st.file_uploader(
+            "Optionaler Salesforce Export, vorhandene Firmen werden ausgeschlossen",
+            type=["csv", "xlsx"],
+            key="quick_crm_upload_v4",
         )
+        if uploaded is not None:
+            try:
+                crm_companies, detected_column, row_count = read_company_file(uploaded)
+                st.info(f"Firmenspalte erkannt: {detected_column}. Zeilen: {row_count}.")
+                if st.button("CRM Firmen übernehmen", key="quick_crm_save_v4"):
+                    try:
+                        exclusions = persist_exclusions(set(exclusions) | crm_companies)
+                        st.success(f"{len(crm_companies)} Firmen übernommen.")
+                    except Exception as exc:
+                        st.error(_google_action_error(exc))
+            except Exception as exc:
+                st.error(str(exc))
 
-        if st.button("Schritt 1 starten", type="primary", key="start_discovery_v5"):
+        if st.button("Schritt 1 starten", type="primary", key="start_discovery_v4"):
             try:
                 regions = parse_regions(regions_text)
             except Exception:
@@ -939,7 +799,6 @@ if page == "Daily Leads":
                 sources.append("Google Jobs")
             if use_careers:
                 sources.append("Karriereseiten")
-
             if not sources:
                 st.error("Aktiviere mindestens eine Quelle.")
                 st.stop()
@@ -952,23 +811,17 @@ if page == "Daily Leads":
 
             scan_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             terms_to_run = next_term_batch(all_terms, int(term_batch_size), logs)
-            career_urls = [
-                line.strip()
-                for line in career_urls_text.splitlines()
-                if line.strip()
-            ]
+            career_urls = [line.strip() for line in career_urls_text.splitlines() if line.strip()]
             append_log(
                 scan_id=scan_id,
                 stage="Suche",
                 status="gestartet",
                 processed_terms=" | ".join(terms_to_run),
-                message="Suchrunde gestartet. Ergebnisse werden nach jedem Begriff gespeichert.",
+                message=f"KMU Suchrunde {campaign} gestartet. Ergebnisse werden nach jedem Begriff gespeichert.",
             )
 
             progress = st.progress(0, text="Suchrunde startet.")
-            total_jobs = 0
-            total_inserted = 0
-            total_updated = 0
+            total_jobs = total_inserted = total_updated = 0
             details: list[str] = []
             completed_terms: list[str] = []
 
@@ -995,35 +848,26 @@ if page == "Daily Leads":
                         adzuna_app_id=adzuna_app_id,
                         adzuna_api_key=adzuna_api_key,
                         ba_fetch_details=False,
+                        focus=campaign,
                     )
                     fresh, discovery_diagnostics = build_discovery_leads(
                         parsed_jobs=parsed_jobs,
                         exclusions=exclusions,
                         existing=frame,
                         scan_id=scan_id,
+                        focus=campaign,
                     )
-                    frame, inserted, updated, changed_ids = upsert_leads(
-                        frame,
-                        fresh,
-                        scan_id,
-                    )
+                    frame, inserted, updated, changed_ids = upsert_leads(frame, fresh, scan_id)
                     frame = apply_crm_status(frame, exclusions)
-                    changed_rows = frame[
-                        _safe_series(frame, "lead_id").isin(changed_ids)
-                    ].copy()
+                    changed_rows = frame[frame["lead_id"].isin(changed_ids)].copy()
                     persist_rows(changed_rows, frame)
 
                     total_jobs += len(parsed_jobs)
                     total_inserted += inserted
                     total_updated += updated
                     completed_terms.append(term)
-                    details.append(
-                        f"{term}: {len(parsed_jobs)} priorisierte Stellen, {inserted} neue Firmen, {updated} aktualisiert."
-                    )
-                    details.extend(
-                        f"{term}: {message}"
-                        for message in scan_diagnostics + discovery_diagnostics
-                    )
+                    details.append(f"{term}: {len(parsed_jobs)} priorisierte Stellen, {inserted} neue Firmen, {updated} aktualisiert.")
+                    details.extend(f"{term}: {message}" for message in scan_diagnostics + discovery_diagnostics)
                     append_log(
                         scan_id=scan_id,
                         stage="Suche",
@@ -1050,7 +894,8 @@ if page == "Daily Leads":
                 )
                 st.session_state["last_pipeline_details"] = details
                 st.success(
-                    f"Gespeichert: {total_inserted} neue Firmen, {total_updated} aktualisiert, {total_jobs} priorisierte Stellen."
+                    f"Gespeichert: {total_inserted} neue Firmen, {total_updated} aktualisiert, "
+                    f"{total_jobs} priorisierte Stellen."
                 )
             except Exception as exc:
                 append_log(
@@ -1064,37 +909,19 @@ if page == "Daily Leads":
                     updated_leads=str(total_updated),
                     message=clean_text(exc),
                 )
-                st.session_state["last_pipeline_details"] = details + [
-                    f"Abbruch: {clean_text(exc)}"
-                ]
+                st.session_state["last_pipeline_details"] = details + [f"Abbruch: {clean_text(exc)}"]
                 st.error(
-                    "Die Suchrunde wurde abgebrochen. Bereits fertige Begriffe sind gespeichert. "
+                    "Die Suchrunde wurde abgebrochen. Bereits fertige Begriffe sind trotzdem gespeichert. "
                     f"Fehler: {clean_text(exc)}"
                 )
             finally:
                 progress.empty()
 
-    research_all = (
-        research_candidate_indices(frame, max(1, len(frame)))
-        if not frame.empty
-        else []
-    )
-    with st.expander(
-        f"Schritt 2: Website, Ansprechpartner, Mail und Telefon recherchieren ({len(research_all)} offen)"
-    ):
-        st.write("Dieser Schritt bearbeitet bereits gespeicherte Firmen in kleinen Paketen.")
-        research_limit = st.number_input(
-            "Firmen pro Recherchepaket",
-            1,
-            20,
-            5,
-            key="research_limit_v5",
-        )
-        if st.button(
-            "Schritt 2 starten",
-            disabled=not research_all,
-            key="start_research_v5",
-        ):
+    research_all = research_candidate_indices(frame, max(1, len(frame))) if not frame.empty else []
+    with st.expander(f"Schritt 2: Website, Ansprechpartner, Mail und Telefon recherchieren ({len(research_all)} offen)"):
+        st.write("Dieser Schritt bearbeitet nur bereits gespeicherte Firmen in kleinen Paketen.")
+        research_limit = st.number_input("Firmen pro Recherchepaket", 1, 20, 5, key="research_limit_v4")
+        if st.button("Schritt 2 starten", disabled=not research_all, key="start_research_v4"):
             indices = research_candidate_indices(frame, int(research_limit))
             run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             append_log(
@@ -1106,33 +933,19 @@ if page == "Daily Leads":
             )
             progress = st.progress(0, text="Recherche startet.")
             details: list[str] = []
-            websites = 0
-            contacts = 0
-
+            websites = contacts = 0
             for position, index in enumerate(indices, start=1):
-                company = _value(frame.loc[index], "firma")
-                progress.progress(
-                    (position - 1) / max(1, len(indices)),
-                    text=f"Recherche {position} von {len(indices)}: {company}",
-                )
-                updated, diagnostics = enrich_lead(
-                    frame.loc[index].to_dict(),
-                    serpapi_key=serpapi_key,
-                )
+                company = frame.loc[index, "firma"]
+                progress.progress((position - 1) / max(1, len(indices)), text=f"Recherche {position} von {len(indices)}: {company}")
+                updated, diagnostics = enrich_lead(frame.loc[index].to_dict(), serpapi_key=serpapi_key)
                 for column in COLUMNS:
-                    frame.loc[index, column] = updated.get(
-                        column,
-                        frame.loc[index, column],
-                    )
+                    frame.loc[index, column] = updated.get(column, frame.loc[index, column])
                 persist_rows(frame.loc[[index]], frame)
-                if _value(frame.loc[index], "website"):
+                if frame.loc[index, "website"]:
                     websites += 1
-                if _value(frame.loc[index], "email") or _value(
-                    frame.loc[index], "telefon"
-                ):
+                if frame.loc[index, "email"] or frame.loc[index, "telefon"]:
                     contacts += 1
                 details.extend(diagnostics)
-
             progress.empty()
             append_log(
                 scan_id=run_id,
@@ -1142,33 +955,13 @@ if page == "Daily Leads":
                 message=f"Websites {websites}, direkte Kontakte {contacts}.",
             )
             st.session_state["last_pipeline_details"] = details
-            st.success(
-                f"Recherche abgeschlossen: {len(indices)} Firmen, {websites} Websites, {contacts} direkte Kontakte."
-            )
+            st.success(f"Recherche abgeschlossen: {len(indices)} Firmen, {websites} Websites, {contacts} direkte Kontakte.")
 
-    ai_all = (
-        ai_candidate_indices(frame, max(1, len(frame)))
-        if not frame.empty
-        else []
-    )
-    with st.expander(
-        f"Schritt 3: Individuelle Sales Texte erzeugen ({len(ai_all)} offen)"
-    ):
-        st.write(
-            "OpenAI wird erst für bereits gespeicherte und möglichst recherchierte Firmen genutzt."
-        )
-        ai_limit = st.number_input(
-            "Firmen pro Textpaket",
-            1,
-            30,
-            10,
-            key="ai_limit_v5",
-        )
-        if st.button(
-            "Schritt 3 starten",
-            disabled=not ai_all,
-            key="start_ai_v5",
-        ):
+    ai_all = ai_candidate_indices(frame, max(1, len(frame))) if not frame.empty else []
+    with st.expander(f"Schritt 3: Individuelle Sales Texte erzeugen ({len(ai_all)} offen)"):
+        st.write("OpenAI wird erst jetzt für die bereits gespeicherten und möglichst recherchierten Firmen genutzt.")
+        ai_limit = st.number_input("Firmen pro Textpaket", 1, 30, 10, key="ai_limit_v4")
+        if st.button("Schritt 3 starten", disabled=not ai_all, key="start_ai_v4"):
             indices = ai_candidate_indices(frame, int(ai_limit))
             run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             append_log(
@@ -1181,28 +974,20 @@ if page == "Daily Leads":
             progress = st.progress(0, text="Texte werden erzeugt.")
             details: list[str] = []
             ai_created = 0
-
             for position, index in enumerate(indices, start=1):
-                company = _value(frame.loc[index], "firma")
-                progress.progress(
-                    (position - 1) / max(1, len(indices)),
-                    text=f"Text {position} von {len(indices)}: {company}",
-                )
+                company = frame.loc[index, "firma"]
+                progress.progress((position - 1) / max(1, len(indices)), text=f"Text {position} von {len(indices)}: {company}")
                 updated, diagnostics = generate_lead_assets(
                     frame.loc[index].to_dict(),
                     api_key=openai_api_key,
                     model=openai_model,
                 )
                 for column in COLUMNS:
-                    frame.loc[index, column] = updated.get(
-                        column,
-                        frame.loc[index, column],
-                    )
+                    frame.loc[index, column] = updated.get(column, frame.loc[index, column])
                 persist_rows(frame.loc[[index]], frame)
-                if _value(frame.loc[index], "ai_status").startswith("KI erstellt"):
+                if frame.loc[index, "ai_status"].startswith("KI erstellt"):
                     ai_created += 1
                 details.extend(diagnostics)
-
             progress.empty()
             append_log(
                 scan_id=run_id,
@@ -1212,9 +997,7 @@ if page == "Daily Leads":
                 message=f"KI Texte {ai_created}, Fallbacks {len(indices) - ai_created}.",
             )
             st.session_state["last_pipeline_details"] = details
-            st.success(
-                f"Textpaket abgeschlossen: {ai_created} KI Texte, {len(indices) - ai_created} Fallbacks."
-            )
+            st.success(f"Textpaket abgeschlossen: {ai_created} KI Texte, {len(indices) - ai_created} Fallbacks.")
 
     with st.expander("Technische Details und Scan Verlauf", expanded=False):
         details = st.session_state.get("last_pipeline_details", [])
@@ -1223,244 +1006,167 @@ if page == "Daily Leads":
                 st.write(f"• {message}")
         else:
             st.caption("In dieser Browser Sitzung gibt es noch keine technischen Details.")
-        current_logs = st.session_state.get(
-            "xing_logs_cache",
-            pd.DataFrame(columns=LOG_COLUMNS),
-        )
+        current_logs = st.session_state.get("xing_logs_cache", pd.DataFrame(columns=LOG_COLUMNS))
         if not current_logs.empty:
-            st.dataframe(
-                current_logs.tail(30),
-                use_container_width=True,
-                hide_index=True,
-            )
+            st.dataframe(current_logs.tail(30), use_container_width=True, hide_index=True)
 
     if frame.empty:
         st.info("Noch keine Leads vorhanden. Starte Schritt 1.")
     else:
         latest_scan = latest_scan_id(frame)
-        display_frame = (
-            frame[_safe_series(frame, "scan_id") == latest_scan].copy()
-            if latest_scan
-            else frame.copy()
-        )
-        display_frame = display_frame[
-            ~_safe_series(display_frame, "status").isin(
-                ["In Salesforce übernommen", "Ausschließen"]
-            )
-            & (_safe_series(display_frame, "crm_status") != "Bereits in Salesforce")
+        latest_frame = frame[frame["scan_id"] == latest_scan].copy() if latest_scan else frame.copy()
+        latest_frame = latest_frame[
+            ~latest_frame["status"].isin(["In Salesforce übernommen", "Ausschließen"])
+            & (latest_frame["crm_status"] != "Bereits in Salesforce")
+            & (latest_frame["size_fit"] != "Groß oder unpassend")
         ].copy()
-        display_frame["score_num"] = pd.to_numeric(
-            _safe_series(display_frame, "lead_score"),
-            errors="coerce",
-        ).fillna(0)
-        display_frame = display_frame.sort_values("score_num", ascending=False).head(250)
+        latest_frame["score_num"] = pd.to_numeric(latest_frame["lead_score"], errors="coerce").fillna(0)
+        latest_frame = latest_frame.sort_values("score_num", ascending=False)
 
-        st.markdown("### Offene Leads")
+        view_mode = st.radio(
+            "Ansicht",
+            ["Kleine Direktkunden", "Verkaufsbereit", "Neu gefunden", "Alle offenen Leads"],
+            horizontal=True,
+        )
+        if view_mode == "Kleine Direktkunden":
+            display_frame = frame[
+                (frame["size_fit"] == "Klein")
+                & (~frame["status"].isin(["In Salesforce übernommen", "Ausschließen"]))
+                & (frame["crm_status"] != "Bereits in Salesforce")
+            ].copy()
+        elif view_mode == "Verkaufsbereit":
+            display_frame = frame[
+                ((frame["email"] != "") | (frame["telefon"] != ""))
+                & (frame["call_opener"] != "")
+                & (frame["erstmail"] != "")
+                & (~frame["status"].isin(["In Salesforce übernommen", "Ausschließen"]))
+                & (frame["crm_status"] != "Bereits in Salesforce")
+            ].copy()
+        elif view_mode == "Neu gefunden":
+            display_frame = latest_frame.copy()
+        else:
+            display_frame = frame[
+                ~frame["status"].isin(["In Salesforce übernommen", "Ausschließen"])
+                & (frame["crm_status"] != "Bereits in Salesforce")
+            ].copy()
+        display_frame["score_num"] = pd.to_numeric(display_frame["lead_score"], errors="coerce").fillna(0)
+        display_frame["small_num"] = pd.to_numeric(display_frame["small_business_score"], errors="coerce").fillna(0)
+        display_frame = display_frame.sort_values(
+            ["small_num", "score_num"], ascending=[False, False]
+        ).head(250)
+
         if display_frame.empty:
             st.info("In dieser Ansicht gibt es aktuell keine Leads.")
-        else:
-            for index, row in display_frame.iterrows():
-                with st.container(border=True):
-                    header_columns = st.columns([5, 2, 2])
-                    header_columns[0].subheader(_value(row, "firma"))
-                    score = pd.to_numeric(
-                        pd.Series([_value(row, "lead_score", "0")]),
-                        errors="coerce",
-                    ).fillna(0).iloc[0]
-                    header_columns[1].metric(
-                        _value(row, "hot_status", "Lead"),
-                        int(score),
-                    )
-                    header_columns[2].write(
-                        _value(row, "veroeffentlicht_am", "Datum offen")
-                    )
 
-                    st.write(
-                        f"**Stellenschwerpunkte:** {_value(row, 'offene_stellen', 'nicht erfasst')}"
-                    )
-                    st.write(
-                        f"**Warum interessant:** {_value(row, 'warum_hot', 'noch keine belastbare Begründung')}"
-                    )
-                    if _value(row, "benefits"):
-                        st.write(f"**Benefits:** {_value(row, 'benefits')}")
+        for index, row in display_frame.iterrows():
+            with st.container(border=True):
+                header_columns = st.columns([5, 2, 2])
+                header_columns[0].subheader(row["firma"])
+                header_columns[1].metric(row["hot_status"] or "COLD", int(float(row["lead_score"] or 0)))
+                header_columns[2].write(row["pipeline_stage"] or "Gefunden")
 
-                    contact_columns = st.columns(3)
-                    contact_columns[0].write(
-                        f"**Ansprechpartner:** {_value(row, 'ansprechpartner', 'nicht sicher gefunden')}"
-                    )
-                    contact_columns[1].write(
-                        f"**E Mail:** {_value(row, 'email', 'nicht gefunden')}"
-                    )
-                    contact_columns[2].write(
-                        f"**Telefon:** {_value(row, 'telefon', 'nicht gefunden')}"
-                    )
+                st.write(f"**Segment:** {row['lead_segment'] or 'Kleiner Direktkunde'} · **Größenfit:** {row['size_fit'] or 'offen'}")
+                st.write(f"**Stellenschwerpunkte:** {row['offene_stellen']}")
+                st.write(f"**Warum interessant:** {row['warum_hot'] or 'noch keine belastbare Begründung'}")
+                if row["size_reason"]:
+                    st.caption(f"KMU Bewertung: {row['size_reason']}")
+                if row["benefits"]:
+                    st.write(f"**Benefits:** {row['benefits']}")
+                st.caption(f"Quellen: {row['source_list'] or 'offen'} · bisher {row['times_seen'] or '1'} Mal gefunden")
 
-                    link_columns = st.columns(5)
-                    for position, column, label in [
-                        (0, "website", "Website"),
-                        (1, "kontaktseite", "Kontakt"),
-                        (2, "impressum", "Impressum"),
-                        (3, "karriereseite", "Karriere"),
-                        (4, "stellenlink", "Stelle"),
-                    ]:
-                        link = _value(row, column)
-                        if link:
-                            link_columns[position].link_button(label, link)
+                contact_columns = st.columns(3)
+                contact_columns[0].write(f"**Ansprechpartner:** {row['ansprechpartner'] or 'nicht sicher gefunden'}")
+                contact_columns[1].write(f"**E Mail:** {row['email'] or 'nicht gefunden'}")
+                contact_columns[2].write(f"**Telefon:** {row['telefon'] or 'nicht gefunden'}")
+                st.caption(f"Recherche: {row['research_status'] or 'offen'} · Texte: {row['ai_status'] or 'offen'}")
+                if row["last_error"]:
+                    st.warning(row["last_error"])
 
-                    tabs = st.tabs(["Call", "Erstmail", "Follow ups", "Bearbeiten"])
-                    with tabs[0]:
-                        call_value = st.text_area(
-                            "Call Opener",
-                            _value(row, "call_opener"),
-                            height=120,
-                            key=f"call_{_value(row, 'lead_id')}",
-                        )
-                        discovery_value = st.text_area(
-                            "Discovery Fragen",
-                            _value(row, "discovery_fragen"),
-                            height=230,
-                            key=f"disc_{_value(row, 'lead_id')}",
-                        )
-                        challenger_value = st.text_area(
-                            "Challenger Reframe",
-                            _value(row, "challenger_reframe"),
-                            height=130,
-                            key=f"challenger_{_value(row, 'lead_id')}",
-                        )
-                    with tabs[1]:
-                        subject_value = st.text_input(
-                            "Betreff",
-                            _value(row, "erstmail_betreff"),
-                            key=f"subject_{_value(row, 'lead_id')}",
-                        )
-                        mail_value = st.text_area(
-                            "Mail",
-                            _value(row, "erstmail"),
-                            height=300,
-                            key=f"mail_{_value(row, 'lead_id')}",
-                        )
-                    with tabs[2]:
-                        follow1_value = st.text_area(
-                            "Follow up 1",
-                            _value(row, "follow_up_1"),
-                            height=220,
-                            key=f"follow1_{_value(row, 'lead_id')}",
-                        )
-                        follow2_value = st.text_area(
-                            "Follow up 2",
-                            _value(row, "follow_up_2"),
-                            height=220,
-                            key=f"follow2_{_value(row, 'lead_id')}",
-                        )
-                    with tabs[3]:
-                        current_status = _value(row, "status")
-                        status_options = list(STATUSES)
-                        status_index = (
-                            status_options.index(current_status)
-                            if current_status in status_options
-                            else 0
-                        )
-                        status_value = st.selectbox(
-                            "Status",
-                            status_options,
-                            index=status_index,
-                            key=f"status_{_value(row, 'lead_id')}",
-                        )
-                        parsed_due = pd.to_datetime(
-                            _value(row, "wiedervorlage"),
-                            errors="coerce",
-                        )
-                        due_default = (
-                            parsed_due.date()
-                            if not pd.isna(parsed_due)
-                            else date.today() + timedelta(days=2)
-                        )
-                        due_value = st.date_input(
-                            "Wiedervorlage",
-                            value=due_default,
-                            key=f"due_{_value(row, 'lead_id')}",
-                        )
-                        note_value = st.text_area(
-                            "Arbeitsnotiz",
-                            _value(row, "notiz"),
-                            key=f"note_{_value(row, 'lead_id')}",
-                        )
-                        lock_value = st.checkbox(
-                            "Meine Textänderungen bei künftigen Läufen beibehalten",
-                            value=_value(row, "text_locked") == "ja",
-                            key=f"lock_{_value(row, 'lead_id')}",
-                        )
-                        if st.button(
-                            "Änderungen speichern",
-                            key=f"save_{_value(row, 'lead_id')}",
-                        ):
-                            updates = {
-                                "call_opener": call_value,
-                                "discovery_fragen": discovery_value,
-                                "challenger_reframe": challenger_value,
-                                "erstmail_betreff": subject_value,
-                                "erstmail": mail_value,
-                                "follow_up_1": follow1_value,
-                                "follow_up_2": follow2_value,
-                                "status": status_value,
-                                "wiedervorlage": due_value.isoformat(),
-                                "notiz": note_value,
-                                "text_locked": "ja" if lock_value else "",
-                            }
-                            for column, new_value in updates.items():
-                                if column in frame.columns:
-                                    frame.loc[index, column] = new_value
+                link_columns = st.columns(5)
+                if row["website"]:
+                    link_columns[0].link_button("Website", row["website"])
+                if row["kontaktseite"]:
+                    link_columns[1].link_button("Kontakt", row["kontaktseite"])
+                if row["impressum"]:
+                    link_columns[2].link_button("Impressum", row["impressum"])
+                if row["karriereseite"]:
+                    link_columns[3].link_button("Karriere", row["karriereseite"])
+                if row["stellenlink"]:
+                    link_columns[4].link_button("Stelle", row["stellenlink"])
+
+                tabs = st.tabs(["Call", "Erstmail", "Follow ups", "Bearbeiten"])
+                with tabs[0]:
+                    call_value = st.text_area("Call Opener", row["call_opener"], height=120, key=f"call_{row['lead_id']}")
+                    discovery_value = st.text_area("Discovery Fragen", row["discovery_fragen"], height=230, key=f"disc_{row['lead_id']}")
+                    challenger_value = st.text_area("Challenger Reframe", row["challenger_reframe"], height=130, key=f"challenger_{row['lead_id']}")
+                with tabs[1]:
+                    subject_value = st.text_input("Betreff", row["erstmail_betreff"], key=f"subject_{row['lead_id']}")
+                    mail_value = st.text_area("Mail", row["erstmail"], height=300, key=f"mail_{row['lead_id']}")
+                with tabs[2]:
+                    follow1_value = st.text_area("Follow up 1", row["follow_up_1"], height=220, key=f"follow1_{row['lead_id']}")
+                    follow2_value = st.text_area("Follow up 2", row["follow_up_2"], height=220, key=f"follow2_{row['lead_id']}")
+                with tabs[3]:
+                    status_value = st.selectbox(
+                        "Status",
+                        STATUSES,
+                        index=STATUSES.index(row["status"]) if row["status"] in STATUSES else 0,
+                        key=f"status_{row['lead_id']}",
+                    )
+                    parsed_due = pd.to_datetime(row["wiedervorlage"], errors="coerce")
+                    due_default = parsed_due.date() if not pd.isna(parsed_due) else date.today() + timedelta(days=2)
+                    due_value = st.date_input("Wiedervorlage", value=due_default, key=f"due_{row['lead_id']}")
+                    note_value = st.text_area("Arbeitsnotiz", row["notiz"], key=f"note_{row['lead_id']}")
+                    lock_value = st.checkbox(
+                        "Meine Textänderungen bei künftigen Läufen beibehalten",
+                        value=row["text_locked"] == "ja",
+                        key=f"lock_{row['lead_id']}",
+                    )
+                    if st.button("Änderungen speichern", key=f"save_{row['lead_id']}"):
+                        frame.loc[index, "call_opener"] = call_value
+                        frame.loc[index, "discovery_fragen"] = discovery_value
+                        frame.loc[index, "challenger_reframe"] = challenger_value
+                        frame.loc[index, "erstmail_betreff"] = subject_value
+                        frame.loc[index, "erstmail"] = mail_value
+                        frame.loc[index, "follow_up_1"] = follow1_value
+                        frame.loc[index, "follow_up_2"] = follow2_value
+                        frame.loc[index, "status"] = status_value
+                        frame.loc[index, "wiedervorlage"] = due_value.isoformat()
+                        frame.loc[index, "notiz"] = note_value
+                        frame.loc[index, "text_locked"] = "ja" if lock_value else ""
+                        try:
                             persist_rows(frame.loc[[index]], frame)
+                            if status_value in {"Ausschließen", "In Salesforce übernommen"}:
+                                exclusions = persist_exclusions(set(exclusions) | {row["firma"]})
                             st.success("Gespeichert.")
-
+                        except Exception as exc:
+                            st.error(_google_action_error(exc))
 
 elif page == "Follow ups":
     st.title("Follow ups")
     today = date.today().isoformat()
     due_frame = frame[
-        (_safe_series(frame, "wiedervorlage") != "")
-        & (_safe_series(frame, "wiedervorlage") <= today)
-        & ~_safe_series(frame, "status").isin(
-            ["In Salesforce übernommen", "Ausschließen"]
-        )
+        (frame["wiedervorlage"] != "")
+        & (frame["wiedervorlage"] <= today)
+        & (~frame["status"].isin(["In Salesforce übernommen", "Ausschließen"]))
     ].copy()
-
     if due_frame.empty:
         st.success("Keine Follow ups fällig.")
     else:
         for index, row in due_frame.iterrows():
             with st.container(border=True):
-                st.subheader(_value(row, "firma"))
-                st.write(
-                    f"**Fällig:** {_value(row, 'wiedervorlage')} · **Status:** {_value(row, 'status')}"
-                )
-                st.write(
-                    f"**Kontakt:** {_value(row, 'ansprechpartner')} · {_value(row, 'email')} · {_value(row, 'telefon')}"
-                )
-                st.text_area(
-                    "Follow up",
-                    _value(row, "follow_up_1"),
-                    height=240,
-                    key=f"due_mail_{_value(row, 'lead_id')}",
-                )
+                st.subheader(row["firma"])
+                st.write(f"**Fällig:** {row['wiedervorlage']} · **Status:** {row['status']}")
+                st.write(f"**Kontakt:** {row['ansprechpartner']} · {row['email']} · {row['telefon']}")
+                st.text_area("Follow up", row["follow_up_1"], height=240, key=f"due_mail_{row['lead_id']}")
                 action_columns = st.columns(2)
-                if action_columns[0].button(
-                    "In Salesforce übernommen",
-                    key=f"sf_{_value(row, 'lead_id')}",
-                ):
+                if action_columns[0].button("In Salesforce übernommen", key=f"sf_{row['lead_id']}"):
                     frame.loc[index, "status"] = "In Salesforce übernommen"
                     persist_rows(frame.loc[[index]], frame)
                     st.rerun()
-                if action_columns[1].button(
-                    "Noch drei Tage",
-                    key=f"plus3_{_value(row, 'lead_id')}",
-                ):
-                    frame.loc[index, "wiedervorlage"] = (
-                        date.today() + timedelta(days=3)
-                    ).isoformat()
+                if action_columns[1].button("Noch drei Tage", key=f"plus3_{row['lead_id']}"):
+                    frame.loc[index, "wiedervorlage"] = (date.today() + timedelta(days=3)).isoformat()
                     persist_rows(frame.loc[[index]], frame)
                     st.rerun()
-
 
 elif page == "Alle Leads":
     st.title("Alle Leads")
@@ -1471,55 +1177,24 @@ elif page == "Alle Leads":
             lambda column: column.str.contains(search, case=False, na=False)
         ).any(axis=1)
         filtered = filtered[mask]
-
-    preferred_columns = [
-        "hot_status",
-        "lead_score",
-        "firma",
-        "pipeline_stage",
-        "crm_status",
-        "anzahl_stellen",
-        "offene_stellen",
-        "orte",
-        "ansprechpartner",
-        "rolle",
-        "email",
-        "telefon",
-        "website",
-        "research_status",
-        "ai_status",
-        "status",
-        "wiedervorlage",
-        "first_seen",
-        "zuletzt_gefunden",
-        "times_seen",
-    ]
-    visible_columns = [
-        column for column in preferred_columns if column in filtered.columns
-    ]
-    table = filtered[visible_columns].copy()
-    if "lead_score" in table.columns:
-        table["lead_score"] = pd.to_numeric(
-            table["lead_score"],
-            errors="coerce",
-        ).fillna(0).astype(int)
-
-    column_config = {}
-    if "website" in table.columns:
-        column_config["website"] = st.column_config.LinkColumn("Website")
-    if "lead_score" in table.columns:
-        column_config["lead_score"] = st.column_config.NumberColumn(
-            "Score",
-            format="%d",
-        )
-
+    table = filtered[[
+        "hot_status", "lead_score", "small_business_score", "firma", "lead_segment", "size_fit",
+        "pipeline_stage", "crm_status", "anzahl_stellen", "offene_stellen", "orte", "ansprechpartner", "rolle",
+        "email", "telefon", "website", "research_status", "ai_status", "status",
+        "wiedervorlage", "first_seen", "zuletzt_gefunden", "times_seen",
+    ]].copy()
+    table["lead_score"] = pd.to_numeric(table["lead_score"], errors="coerce").fillna(0).astype(int)
+    table["small_business_score"] = pd.to_numeric(table["small_business_score"], errors="coerce").fillna(0).astype(int)
     st.dataframe(
         table,
         use_container_width=True,
         hide_index=True,
-        column_config=column_config,
+        column_config={
+            "website": st.column_config.LinkColumn("Website"),
+            "lead_score": st.column_config.NumberColumn("Sales Score", format="%d"),
+            "small_business_score": st.column_config.NumberColumn("KMU Score", format="%d"),
+        },
     )
-
     export_csv = filtered.reindex(columns=COLUMNS).to_csv(index=False).encode("utf-8-sig")
     st.download_button(
         "Gefilterte Tabelle als CSV herunterladen",
@@ -1528,60 +1203,43 @@ elif page == "Alle Leads":
         mime="text/csv",
     )
 
+elif page == "Salesforce Abgleich":
+    st.title("Salesforce Abgleich")
+    st.write("Lade einen Salesforce Account Export als CSV oder XLSX hoch. Vorhandene Firmen werden dauerhaft ausgeschlossen.")
+    crm_file = st.file_uploader("Salesforce Export hochladen", type=["csv", "xlsx"], key="salesforce_export_v4")
+    if crm_file is not None:
+        try:
+            crm_companies, detected_column, row_count = read_company_file(crm_file)
+            matches = {
+                normalize_company(company)
+                for company in frame.get("firma", [])
+                if crm_match(company, crm_companies)
+            }
+            metric_columns = st.columns(3)
+            metric_columns[0].metric("Zeilen im Export", row_count)
+            metric_columns[1].metric("Eindeutige Firmen", len(crm_companies))
+            metric_columns[2].metric("Treffer in Leadliste", len(matches))
+            st.info(f"Erkannte Firmenspalte: {detected_column}")
+            if st.button("Salesforce Firmen dauerhaft abgleichen"):
+                combined = set(exclusions) | crm_companies
+                exclusions = persist_exclusions(combined)
+                frame = apply_crm_status(frame, exclusions)
+                persist_full(frame)
+                st.success(f"{len(crm_companies)} Salesforce Firmen gespeichert.")
+        except Exception as exc:
+            st.error(str(exc))
 
-elif page == "Ausgeschlossene Unternehmen":
-    st.title("Ausgeschlossene Unternehmen")
-    st.caption(
-        "Diese Unternehmen werden bei neuen Suchläufen nicht mehr als Leads angelegt."
-    )
-
-    exclusions = exclusion_upload_block(
-        "Datei importieren",
-        "exclusion_page_v5",
-        exclusions,
-    )
-
-    st.markdown("#### Manuell ergänzen")
-    manual_company = st.text_input(
-        "Unternehmensname",
-        key="manual_exclusion_company_v5",
-    )
-    if st.button("Unternehmen hinzufügen", key="manual_exclusion_add_v5"):
-        normalized = normalize_company(manual_company)
-        if not normalized:
-            st.error("Bitte einen Unternehmensnamen eingeben.")
-        elif normalized in exclusions:
-            st.info("Dieses Unternehmen ist bereits ausgeschlossen.")
-        else:
-            persist_exclusions(exclusions | {normalized})
-            st.success("Unternehmen wurde ausgeschlossen.")
-            st.rerun()
-
-    st.markdown(f"#### Gespeichert: {len(exclusions)} Unternehmen")
-    exclusion_frame = pd.DataFrame({"Unternehmen": sorted(exclusions)})
-    st.dataframe(exclusion_frame, use_container_width=True, hide_index=True)
-
-    export_exclusions = exclusion_frame.to_csv(index=False).encode("utf-8-sig")
-    st.download_button(
-        "Ausschlussliste als CSV herunterladen",
-        export_exclusions,
-        file_name="ausgeschlossene_unternehmen.csv",
-        mime="text/csv",
-    )
-
-    with st.expander("Ein Unternehmen wieder zulassen"):
-        if exclusions:
-            selected_company = st.selectbox(
-                "Unternehmen auswählen",
-                sorted(exclusions),
-                key="remove_exclusion_select_v5",
-            )
-            if st.button(
-                "Aus Ausschlussliste entfernen",
-                key="remove_exclusion_button_v5",
-            ):
-                persist_exclusions(exclusions - {selected_company})
-                st.success("Unternehmen ist bei neuen Suchläufen wieder zugelassen.")
-                st.rerun()
-        else:
-            st.info("Es sind keine Unternehmen ausgeschlossen.")
+elif page == "CRM Ausschluss":
+    st.title("CRM Ausschluss")
+    st.caption("Diese Firmen werden bei neuen Suchläufen nicht mehr als Leads angelegt.")
+    manual = st.text_area("Firmen hinzufügen, eine Zeile je Firma")
+    if st.button("Firmen speichern"):
+        new_items = {normalize_company(value) for value in manual.splitlines() if value.strip()}
+        try:
+            exclusions = persist_exclusions(set(exclusions) | new_items)
+            st.success("Ausschlussliste aktualisiert.")
+        except Exception as exc:
+            st.error(_google_action_error(exc))
+    st.write(f"**Aktuell gespeichert:** {len(exclusions)} Firmen")
+    if exclusions:
+        st.dataframe(pd.DataFrame({"Firma normalisiert": sorted(exclusions)}), hide_index=True)

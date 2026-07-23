@@ -41,10 +41,94 @@ PUBLIC_KEYWORDS = {
 LARGE_COMPANY_KEYWORDS = {
     "deutsche bahn", "db regio", "db infrago", "deutsche post", "dhl",
     "amazon", "siemens", "bosch", "volkswagen", "mercedes-benz", "bmw group",
-    "continental", "lidl", "kaufland", "aldi", "rewe group",
+    "continental", "lidl", "kaufland", "aldi", "rewe group", "edeka zentrale",
     "deutsche telekom", "vodafone", "allianz", "helios kliniken",
     "asklepios", "sana kliniken", "ameos", "korian", "fresenius",
     "thyssenkrupp", "basf", "bayer ag", "rwe ag", "e.on", "ikea", "zalando",
+    "deutsche rentenversicherung", "tüv nord", "tüv süd", "tüv rheinland",
+    "decathlon", "dm-drogerie", "rossmann", "obi", "hornbach", "toom",
+    "vonovia", "deutsche wohnen", "deutsche bank", "commerzbank", "santander",
+    "sparkasse", "volksbank", "universitätsklinikum", "uniklinik", "klinikum",
+}
+
+# Signale, die auf einen kleinen, direkt ansprechbaren Arbeitgeber hindeuten.
+SMALL_BUSINESS_SIGNALS = {
+    "praxis", "physiotherapie", "ergotherapie", "logopädie", "logopaedie",
+    "sprachtherapie", "therapiezentrum", "gemeinschaftspraxis", "arztpraxis",
+    "zahnarztpraxis", "steuerkanzlei", "steuerberater", "steuerberatung",
+    "kanzlei", "wirtschaftskanzlei", "pflegedienst", "ambulante pflege",
+    "sozialstation", "pflege zuhause", "meisterbetrieb", "tischlerei",
+    "schreinerei", "elektrotechnik", "haustechnik", "sanitär", "heizung",
+    "klimatechnik", "kältetechnik", "metallbau", "maschinenbau", "ingenieurbüro",
+    "ingenieurbuero", "planungsbüro", "planungsbuero", "architekturbüro",
+    "architekturbuero", "inhabergeführt", "inhabergefuehrt", "familienbetrieb",
+}
+
+# Signale für Konzerne, Ketten oder zentrale Recruiting-Strukturen.
+ENTERPRISE_SIGNALS = {
+    "konzern", "unternehmensgruppe", "holding", "group", "international",
+    "weltweit", "europaweit", "bundesweit", "deutschlandweit", "zentrale",
+    "zentraler personalbereich", "karriereportal", "talent acquisition team",
+    "shared service", "mehr als 1000 mitarbeiter", "über 1000 mitarbeiter",
+    "mehr als 500 mitarbeiter", "über 500 mitarbeiter", "mehr als 50 standorte",
+    "über 50 standorte", "mehr als 20 standorte", "über 20 standorte",
+    "niederlassungen in ganz deutschland", "filialen in ganz deutschland",
+}
+
+CHAIN_NAME_SIGNALS = {
+    "gruppe", "group", "holding", "kliniken", "klinikverbund", "gesundheitsgruppe",
+    "pflegegruppe", "seniorenzentren", "medical care", "healthcare", "retail",
+    "services deutschland", "solutions deutschland", "germany gmbh", "europe gmbh",
+}
+
+SEGMENT_KEYWORDS = {
+    "Therapiepraxis": {
+        "physio", "ergotherapeut", "ergotherapie", "logopä", "logopaed",
+        "sprachtherap", "therapie", "praxis", "therapiezentrum",
+    },
+    "Steuerkanzlei": {
+        "steuerfach", "steuerberater", "steuerberatung", "steuerkanzlei",
+        "bilanzbuch", "lohnbuch", "finanzbuch", "datev", "kanzlei",
+    },
+    "Ambulante Pflege": {
+        "ambulante pflege", "pflegedienst", "sozialstation", "pflege zuhause",
+        "pflegefach", "altenpflege", "häusliche pflege", "haeusliche pflege",
+    },
+    "Arztpraxis": {
+        "medizinische fachang", "mfa", "arztpraxis", "zahnarztpraxis",
+        "zahnmedizin", "praxismanager", "praxisleitung",
+    },
+    "Handwerk und Technik": {
+        "elektroniker", "elektriker", "mechatron", "anlagenmechaniker", "shk",
+        "sanitär", "heizung", "klima", "kälte", "kaelte", "servicetechn",
+        "schweißer", "schweisser", "industriemechan", "metallbau", "tischler",
+        "schreiner", "dachdecker", "meisterbetrieb",
+    },
+    "Ingenieurbüro": {
+        "ingenieurbüro", "ingenieurbuero", "planungsbüro", "planungsbuero",
+        "bauleiter", "projektingenieur", "konstrukteur", "architekturbüro",
+        "architekturbuero", "projektleiter bau",
+    },
+    "Kleines IT Unternehmen": {
+        "softwareentwickler", "developer", "devops", "systemadministrator",
+        "it support", "softwarehaus", "it dienstleister",
+    },
+    "Kleiner Direktkunde": set(),
+}
+
+FOCUS_SEGMENTS = {
+    "Alle kleinen Direktkunden": {
+        "Therapiepraxis", "Steuerkanzlei", "Ambulante Pflege", "Arztpraxis",
+        "Handwerk und Technik", "Ingenieurbüro", "Kleines IT Unternehmen",
+        "Kleiner Direktkunde",
+    },
+    "Therapiepraxen": {"Therapiepraxis"},
+    "Steuerkanzleien": {"Steuerkanzlei"},
+    "Ambulante Pflege": {"Ambulante Pflege"},
+    "Arztpraxen": {"Arztpraxis"},
+    "Handwerk und Technik": {"Handwerk und Technik"},
+    "Kleine Ingenieurbüros": {"Ingenieurbüro"},
+    "Kleine IT Unternehmen": {"Kleines IT Unternehmen"},
 }
 
 TARGET_KEYWORDS = {
@@ -717,92 +801,295 @@ def _company_stats(jobs: list[dict]) -> dict[str, dict]:
     return result
 
 
-def score_and_filter(jobs: list[dict], diagnostics: list[str]) -> list[dict]:
+
+def _segment_for(combined: str) -> tuple[str, list[str]]:
+    normal = _norm(combined)
+    best_segment = "Kleiner Direktkunde"
+    best_hits: list[str] = []
+    for segment, keywords in SEGMENT_KEYWORDS.items():
+        if not keywords:
+            continue
+        hits = [keyword for keyword in keywords if _norm(keyword) in normal]
+        if len(hits) > len(best_hits):
+            best_segment = segment
+            best_hits = hits
+    return best_segment, best_hits[:4]
+
+
+def _number_size_signal(text: str) -> int:
+    """Liest grobe Mitarbeiterangaben aus Texten. 0 bedeutet unbekannt."""
+    normal = _norm(text)
+    patterns = [
+        r"(?:ueber|mehr als|rund|ca\.?|circa)?\s*(\d{2,6})\s*(?:mitarbeiter|beschaeftigte|kollegen)",
+        r"(\d{2,6})\+\s*(?:mitarbeiter|beschaeftigte|kollegen)",
+    ]
+    values: list[int] = []
+    for pattern in patterns:
+        for match in re.findall(pattern, normal):
+            try:
+                values.append(int(match))
+            except (TypeError, ValueError):
+                pass
+    return max(values or [0])
+
+
+def _small_business_profile(
+    *,
+    company: str,
+    title: str,
+    description: str,
+    term: str,
+    company_data: dict,
+    focus: str,
+) -> dict[str, Any]:
+    combined = " ".join([company, title, description, term])
+    normal = _norm(combined)
+    company_normal = _norm(company)
+    segment, segment_hits = _segment_for(combined)
+    job_count = int(company_data.get("job_count", 1) or 1)
+    distinct_titles = int(company_data.get("distinct_titles", 1) or 1)
+    location_count = int(company_data.get("location_count", 1) or 1)
+
+    small_hits = [keyword for keyword in SMALL_BUSINESS_SIGNALS if _norm(keyword) in normal]
+    enterprise_hits = [keyword for keyword in ENTERPRISE_SIGNALS if _norm(keyword) in normal]
+    chain_hits = [keyword for keyword in CHAIN_NAME_SIGNALS if _norm(keyword) in company_normal]
+    employee_count = _number_size_signal(description)
+
+    reasons: list[str] = []
+    score = 42
+    if small_hits:
+        score += min(28, 12 + len(small_hits) * 4)
+        reasons.append("KMU Signal: " + ", ".join(small_hits[:3]))
+    if segment != "Kleiner Direktkunde":
+        score += 10
+        reasons.append("Segment: " + segment)
+
+    if job_count <= 3:
+        score += 18
+        reasons.append(f"nur {job_count} offene Stelle" + ("n" if job_count != 1 else ""))
+    elif job_count <= 5:
+        score += 8
+        reasons.append(f"überschaubare {job_count} Stellen")
+    elif job_count <= 8:
+        score -= 8
+    else:
+        score -= 50
+
+    if location_count <= 1:
+        score += 10
+        reasons.append("ein Standort")
+    elif location_count == 2:
+        score += 3
+    elif location_count == 3:
+        score -= 10
+    else:
+        score -= 45
+
+    if distinct_titles == 1:
+        score += 7
+    elif distinct_titles <= 3:
+        score += 3
+    elif distinct_titles >= 6:
+        score -= 30
+
+    if employee_count:
+        if employee_count <= 50:
+            score += 12
+            reasons.append(f"ca. {employee_count} Mitarbeitende")
+        elif employee_count <= 200:
+            score += 2
+        elif employee_count > 500:
+            score -= 55
+            enterprise_hits.append(f"{employee_count} Mitarbeitende")
+        else:
+            score -= 18
+
+    if enterprise_hits:
+        score -= min(60, 22 + len(enterprise_hits) * 12)
+    if chain_hits:
+        score -= min(45, 15 + len(chain_hits) * 10)
+
+    allowed_segments = FOCUS_SEGMENTS.get(focus, FOCUS_SEGMENTS["Alle kleinen Direktkunden"])
+    focus_match = segment in allowed_segments
+    if focus != "Alle kleinen Direktkunden" and not focus_match:
+        score -= 45
+
+    hard_reasons: list[str] = []
+    if job_count > 8:
+        hard_reasons.append(f"{job_count} Stellen")
+    if location_count > 3:
+        hard_reasons.append(f"{location_count} Standorte")
+    if distinct_titles > 6:
+        hard_reasons.append(f"{distinct_titles} unterschiedliche Rollen")
+    if employee_count > 500:
+        hard_reasons.append(f"{employee_count} Mitarbeitende")
+    if len(enterprise_hits) >= 2 or chain_hits:
+        hard_reasons.append("Konzern oder Kettenstruktur")
+    if focus != "Alle kleinen Direktkunden" and not focus_match:
+        hard_reasons.append("passt nicht zur gewählten Kampagne")
+
+    score = max(0, min(100, score))
+    if hard_reasons or score < 35:
+        size_fit = "Groß oder unpassend"
+    elif score >= 70:
+        size_fit = "Klein"
+    else:
+        size_fit = "Mittel"
+
+    return {
+        "segment": segment,
+        "segment_hits": segment_hits,
+        "small_business_score": score,
+        "size_fit": size_fit,
+        "size_reason": "; ".join(reasons[:5] + (["Abzug: " + ", ".join(hard_reasons)] if hard_reasons else [])),
+        "hard_exclude": bool(hard_reasons),
+        "focus_match": focus_match,
+    }
+
+
+def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "Alle kleinen Direktkunden") -> list[dict]:
     unique = deduplicate(jobs)
     stats = _company_stats(unique)
-    output = []
-    excluded = {"staffing": 0, "public": 0, "large": 0, "low_score": 0}
+    output: list[dict] = []
+    excluded = {
+        "staffing": 0,
+        "public": 0,
+        "large_name": 0,
+        "oversize": 0,
+        "focus": 0,
+        "low_score": 0,
+    }
+
     for job in unique:
         company = job.get("company", "")
         title = job.get("title", "")
         description = job.get("description", "")
-        combined = " ".join([company, title, description, job.get("term", "")])
+        term = job.get("term", "")
+        combined = " ".join([company, title, description, term])
+
         if _hit(combined, STAFFING_KEYWORDS):
             excluded["staffing"] += 1
             continue
-        if _hit(company + " " + title + " " + description[:1200], PUBLIC_KEYWORDS):
+        if _hit(company + " " + title + " " + description[:1600], PUBLIC_KEYWORDS):
             excluded["public"] += 1
             continue
         if _hit(company, LARGE_COMPANY_KEYWORDS):
-            excluded["large"] += 1
+            excluded["large_name"] += 1
             continue
 
         company_data = stats.get(_company_key(company), {})
-        score = 8
-        reasons = []
+        profile = _small_business_profile(
+            company=company,
+            title=title,
+            description=description,
+            term=term,
+            company_data=company_data,
+            focus=focus,
+        )
+        if profile["hard_exclude"]:
+            if not profile["focus_match"] and focus != "Alle kleinen Direktkunden":
+                excluded["focus"] += 1
+            else:
+                excluded["oversize"] += 1
+            continue
+
+        score = 10
+        reasons: list[str] = []
         points, hits = _weighted(combined, TARGET_KEYWORDS)
         if points:
-            score += min(34, points)
+            score += min(28, points)
             reasons.append("Zielgruppe: " + ", ".join(hits[:3]))
         points, hits = _weighted(combined, BUYING_SIGNALS)
         if points:
-            score += min(15, points)
+            score += min(12, points)
             reasons.append("Recruitingdruck: " + ", ".join(hits[:3]))
         points, hits = _weighted(description, BENEFIT_KEYWORDS)
         if points:
-            score += min(12, points)
+            score += min(8, points)
             reasons.append("Benefits: " + ", ".join(hits[:3]))
 
-        job_count = company_data.get("job_count", 1)
-        distinct_titles = company_data.get("distinct_titles", 1)
-        location_count = company_data.get("location_count", 1)
-        source_count = company_data.get("source_count", 1)
-        if 2 <= job_count <= 9:
-            score += min(18, 5 + (job_count - 2) * 2)
-            reasons.append(f"{job_count} offene Stellen")
-        if distinct_titles >= 2:
-            score += min(8, distinct_titles * 2)
-            reasons.append(f"{distinct_titles} verschiedene Rollen")
-        if location_count >= 2:
-            score += min(7, location_count * 2)
-            reasons.append(f"{location_count} Standorte")
+        job_count = int(company_data.get("job_count", 1) or 1)
+        distinct_titles = int(company_data.get("distinct_titles", 1) or 1)
+        location_count = int(company_data.get("location_count", 1) or 1)
+        source_count = int(company_data.get("source_count", 1) or 1)
+
+        # Kleine Direktkunden werden bewusst vor großen Multipostern priorisiert.
+        if job_count == 1:
+            score += 15
+            reasons.append("konkrete Einzelvakanz")
+        elif job_count <= 3:
+            score += 20
+            reasons.append(f"{job_count} konkrete Stellen")
+        elif job_count <= 5:
+            score += 10
+            reasons.append(f"{job_count} überschaubare Stellen")
+        else:
+            score -= 8
+
+        if distinct_titles == 1:
+            score += 7
+            reasons.append("klares Suchprofil")
+        elif distinct_titles <= 3:
+            score += 3
+        else:
+            score -= 10
+
+        if location_count <= 1:
+            score += 9
+            reasons.append("regionaler Direktkunde")
+        elif location_count == 2:
+            score += 3
+        else:
+            score -= 8
+
         if source_count >= 2:
-            score += 4
-            reasons.append("mehrere Jobquellen")
+            score += 2
         if job.get("email"):
             score += 8
             reasons.append("E Mail vorhanden")
         if job.get("contact"):
-            score += 7
+            score += 8
             reasons.append("Ansprechpartner vorhanden")
         if job.get("phone"):
-            score += 4
-        if job.get("external_url"):
-            score += 3
-        if len(description) >= 500:
-            score += 3
-        if "Karriereseite" in job.get("source", ""):
             score += 5
-            reasons.append("eigene Karriereseite")
-        if job_count >= 20:
-            score -= 18
-        elif job_count >= 10:
-            score -= 8
+        if job.get("external_url"):
+            score += 2
+        if "Karriereseite" in job.get("source", ""):
+            score += 3
+
+        # Der KMU Fit hat mehr Gewicht als reine Stellenmenge.
+        score += round((int(profile["small_business_score"]) - 50) * 0.45)
         score = max(0, min(100, score))
-        if score < MIN_LEAD_SCORE:
+        if score < max(MIN_LEAD_SCORE, 30):
             excluded["low_score"] += 1
             continue
+
         job.update(company_data)
         job["lead_score"] = score
         job["lead_quality"] = "A" if score >= 75 else "B" if score >= 55 else "C"
-        job["lead_reasons"] = "; ".join(reasons[:7])
+        job["lead_segment"] = profile["segment"]
+        job["size_fit"] = profile["size_fit"]
+        job["size_reason"] = profile["size_reason"]
+        job["small_business_score"] = int(profile["small_business_score"])
+        job["lead_reasons"] = "; ".join(
+            ([profile["size_reason"]] if profile["size_reason"] else []) + reasons[:6]
+        )
         output.append(job)
 
-    output.sort(key=lambda x: (x.get("lead_score", 0), x.get("job_count", 0), bool(x.get("contact")), bool(x.get("email"))), reverse=True)
+    output.sort(
+        key=lambda item: (
+            int(item.get("small_business_score", 0) or 0),
+            int(item.get("lead_score", 0) or 0),
+            bool(item.get("contact")),
+            bool(item.get("email") or item.get("phone")),
+            -int(item.get("job_count", 1) or 1),
+        ),
+        reverse=True,
+    )
     diagnostics.append(
-        f"Lead Filter: {len(unique)} eindeutige Stellen geprüft, {len(output)} verkaufsrelevante Treffer. "
-        f"Raus: Staffing {excluded['staffing']}, öffentlich {excluded['public']}, "
-        f"Großunternehmen {excluded['large']}, Score {excluded['low_score']}."
+        f"KMU Filter ({focus}): {len(unique)} eindeutige Stellen geprüft, {len(output)} kleine Direktkunden priorisiert. "
+        f"Raus: Staffing {excluded['staffing']}, öffentlich {excluded['public']}, bekannte Großunternehmen {excluded['large_name']}, "
+        f"zu groß oder Kette {excluded['oversize']}, Kampagne {excluded['focus']}, Score {excluded['low_score']}."
     )
     return output
 
@@ -820,6 +1107,7 @@ def scan_jobs(
     adzuna_api_key: str = "",
     ba_fetch_details: bool = False,
     ba_detail_limit: int = 40,
+    focus: str = "Alle kleinen Direktkunden",
 ) -> tuple[list[dict], list[str]]:
     diagnostics: list[str] = []
     jobs: list[dict] = []
@@ -835,6 +1123,6 @@ def scan_jobs(
         jobs.extend(scan_google_jobs(terms, regions, days, max_pages, serpapi_key, diagnostics))
     if "Karriereseiten" in sources:
         jobs.extend(scan_career_urls(career_urls or [], diagnostics))
-    filtered = score_and_filter(jobs, diagnostics)
-    diagnostics.append(f"Gesamt: {len(filtered)} priorisierte Stellen aus {len(sources)} aktivierten Quellen am {date.today().isoformat()}.")
+    filtered = score_and_filter(jobs, diagnostics, focus=focus)
+    diagnostics.append(f"Gesamt: {len(filtered)} KMU priorisierte Stellen für {focus} aus {len(sources)} aktivierten Quellen am {date.today().isoformat()}.")
     return filtered, diagnostics

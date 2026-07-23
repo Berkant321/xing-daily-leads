@@ -44,6 +44,10 @@ LARGE_COMPANY_WORDS = [
     "deutsche bahn", "db regio", "siemens", "bosch", "amazon", "lidl",
     "aldi", "rewe group", "thyssenkrupp", "telekom", "vodafone",
     "bundeswehr", "universitätsklinikum", "uniklinik", "ministerium",
+    "deutsche post", "dhl", "volkswagen", "mercedes-benz", "bmw group",
+    "continental", "kaufland", "allianz", "helios", "asklepios", "sana kliniken",
+    "ameos", "korian", "fresenius", "basf", "bayer ag", "rwe ag", "e.on",
+    "sparkasse", "volksbank", "tüv nord", "tüv süd", "tüv rheinland",
 ]
 
 STATUSES = [
@@ -61,6 +65,10 @@ COLUMNS = [
     "hot_status",
     "lead_score",
     "discovery_score",
+    "lead_segment",
+    "size_fit",
+    "small_business_score",
+    "size_reason",
     "warum_hot",
     "offene_stellen",
     "job_titles",
@@ -188,6 +196,107 @@ def job_family(title: str) -> str:
     return "Sonstige"
 
 
+
+
+def infer_lead_segment(text: str) -> str:
+    value = normalize_company(text)
+    groups = {
+        "Therapiepraxis": ["physio", "ergotherapeut", "logop", "sprachtherap", "therapie", "praxis"],
+        "Steuerkanzlei": ["steuerfach", "steuerberater", "steuerberatung", "steuerkanzlei", "bilanzbuch", "lohnbuch", "datev", "kanzlei"],
+        "Ambulante Pflege": ["ambulante pflege", "pflegedienst", "sozialstation", "pflegefach", "haeusliche pflege"],
+        "Arztpraxis": ["medizinische fachang", "mfa", "arztpraxis", "zahnarztpraxis", "zahnmedizin"],
+        "Handwerk und Technik": ["elektroniker", "elektriker", "mechatron", "anlagenmechaniker", "shk", "sanitaer", "heizung", "klima", "servicetechn", "schweiss", "metallbau", "tischler", "schreiner"],
+        "Ingenieurbüro": ["ingenieurbuero", "planungsbuero", "bauleiter", "projektingenieur", "konstrukteur", "architekturbuero"],
+        "Kleines IT Unternehmen": ["softwareentwickler", "developer", "devops", "systemadministrator", "softwarehaus", "it dienstleister"],
+    }
+    best = "Kleiner Direktkunde"
+    best_count = 0
+    for segment, keywords in groups.items():
+        count = sum(1 for keyword in keywords if keyword in value)
+        if count > best_count:
+            best = segment
+            best_count = count
+    return best
+
+
+def _hint_number(value: Any) -> int:
+    numbers = [int(item) for item in re.findall(r"\d+", clean_text(value))]
+    return max(numbers or [0])
+
+
+def classify_size_fit(
+    *,
+    company: str,
+    job_count: int,
+    locations: int,
+    segment: str,
+    employee_hint: str = "",
+    current_score: int = 0,
+) -> tuple[str, int, str]:
+    low = normalize_company(company)
+    employee_count = _hint_number(employee_hint)
+    enterprise_words = [
+        "konzern", "holding", "unternehmensgruppe", "group", "kliniken",
+        "klinikverbund", "gesundheitsgruppe", "pflegegruppe", "international",
+        "deutschlandweit", "bundesweit", "germany", "europe",
+    ]
+    large_name = bool(likely_large_or_agency(company)) or any(word in low for word in enterprise_words)
+    reasons: list[str] = []
+    score = current_score or 50
+
+    if job_count <= 3:
+        score += 18
+        reasons.append(f"{job_count} offene Stelle" + ("n" if job_count != 1 else ""))
+    elif job_count <= 5:
+        score += 8
+        reasons.append(f"{job_count} überschaubare Stellen")
+    elif job_count <= 8:
+        score -= 8
+    else:
+        score -= 50
+        reasons.append(f"zu viele Stellen: {job_count}")
+
+    if locations <= 1:
+        score += 10
+        reasons.append("regionaler Arbeitgeber")
+    elif locations == 2:
+        score += 3
+    elif locations == 3:
+        score -= 10
+    else:
+        score -= 45
+        reasons.append(f"zu viele Standorte: {locations}")
+
+    if segment != "Kleiner Direktkunde":
+        score += 8
+        reasons.append(segment)
+
+    if employee_count:
+        if employee_count <= 50:
+            score += 12
+            reasons.append(f"bis ca. {employee_count} Mitarbeitende")
+        elif employee_count <= 200:
+            score += 2
+        elif employee_count > 500:
+            score -= 55
+            reasons.append(f"zu groß: {employee_count} Mitarbeitende")
+        else:
+            score -= 18
+
+    if large_name:
+        score -= 55
+        reasons.append("Konzern oder Kettenstruktur")
+
+    score = max(0, min(100, score))
+    if large_name or job_count > 8 or locations > 3 or employee_count > 500 or score < 35:
+        fit = "Groß oder unpassend"
+    elif score >= 70:
+        fit = "Klein"
+    else:
+        fit = "Mittel"
+    return fit, score, "; ".join(reasons[:6])
+
+
 def empty_row() -> dict[str, str]:
     return {column: "" for column in COLUMNS}
 
@@ -197,7 +306,39 @@ def migrate_frame(frame: pd.DataFrame | None) -> pd.DataFrame:
     for column in COLUMNS:
         if column not in frame.columns:
             frame[column] = ""
-    return frame.reindex(columns=COLUMNS).fillna("").astype(str)
+    frame = frame.reindex(columns=COLUMNS).fillna("").astype(str)
+
+    # Bestehende Leads aus älteren Versionen erhalten automatisch einen KMU Fit.
+    for index, row in frame.iterrows():
+        segment = clean_text(row.get("lead_segment", "")) or infer_lead_segment(
+            " ".join([row.get("firma", ""), row.get("job_titles", ""), row.get("offene_stellen", "")])
+        )
+        locations = max(1, len(split_pipe(row.get("orte", ""))))
+        try:
+            job_count = max(1, int(float(row.get("anzahl_stellen", 1) or 1)))
+        except (TypeError, ValueError):
+            job_count = 1
+        try:
+            current_score = int(float(row.get("small_business_score", 0) or 0))
+        except (TypeError, ValueError):
+            current_score = 0
+        fit, small_score, reason = classify_size_fit(
+            company=row.get("firma", ""),
+            job_count=job_count,
+            locations=locations,
+            segment=segment,
+            employee_hint=row.get("employee_hint", ""),
+            current_score=current_score,
+        )
+        if not clean_text(row.get("lead_segment", "")):
+            frame.at[index, "lead_segment"] = segment
+        if not clean_text(row.get("size_fit", "")) or clean_text(row.get("size_fit", "")) == "offen":
+            frame.at[index, "size_fit"] = fit
+        if not clean_text(row.get("small_business_score", "")):
+            frame.at[index, "small_business_score"] = str(small_score)
+        if not clean_text(row.get("size_reason", "")):
+            frame.at[index, "size_reason"] = reason
+    return frame
 
 
 def crm_match(company: str, exclusions: set[str]) -> bool:
@@ -265,49 +406,87 @@ def score_lead(
     dominant_family = max(family_counts, key=family_counts.get) if family_counts else "Sonstige"
     dominant_share = family_counts.get(dominant_family, 0) / max(1, len(families))
 
-    if 2 <= len(jobs) <= 8:
-        score += 8
-        reasons.append(f"{len(jobs)} konkrete Stellen")
-    elif len(jobs) > 15:
-        score -= 12
-        penalties.append("sehr viele Ausschreibungen")
+    segment = clean_text(next((job.get("lead_segment", "") for job in jobs if job.get("lead_segment")), ""))
+    segment = segment or infer_lead_segment(" ".join([company] + titles))
+    size_fit = clean_text(next((job.get("size_fit", "") for job in jobs if job.get("size_fit")), ""))
+    small_scores = [int(float(job.get("small_business_score", 0) or 0)) for job in jobs]
+    small_score = max(small_scores or [50])
 
-    if len(titles) >= 2 and dominant_share >= 0.65:
-        score += 9
+    if len(jobs) <= 3:
+        score += 12
+        reasons.append(f"kleiner Bedarf mit {len(jobs)} Stelle" + ("n" if len(jobs) != 1 else ""))
+    elif len(jobs) <= 5:
+        score += 5
+    elif len(jobs) > 8:
+        score -= 45
+        penalties.append("zu viele Ausschreibungen")
+
+    if len(titles) == 1:
+        score += 6
+        reasons.append("klares Suchprofil")
+    elif len(titles) >= 2 and dominant_share >= 0.65:
+        score += 5
         reasons.append(f"klarer Schwerpunkt: {dominant_family}")
+    elif len(titles) > 5:
+        score -= 20
+        penalties.append("zu viele verschiedene Rollen")
+
+    if size_fit == "Klein":
+        score += 12
+        reasons.append("kleiner Direktkunde")
+    elif size_fit == "Mittel":
+        score += 3
+    elif size_fit == "Groß oder unpassend":
+        score -= 60
+        penalties.append("Großunternehmen oder Kette")
+
+    score += round((small_score - 50) * 0.25)
 
     if research.get("person"):
-        score += 8
+        score += 9
         reasons.append("Ansprechpartner gefunden")
     if research.get("email"):
-        score += 7
+        score += 8
         reasons.append("E Mail gefunden")
     if research.get("phone"):
-        score += 6
+        score += 7
         reasons.append("Telefon gefunden")
     if research.get("website"):
-        score += 4
+        score += 3
     if len(benefits) >= 4:
         score += 7
         reasons.append("starke Benefits")
     elif len(benefits) >= 2:
         score += 4
-        reasons.append("mehrere Benefits")
     if previous_times_seen >= 2:
         score += min(7, previous_times_seen + 2)
         reasons.append("wiederkehrender Personalbedarf")
-    if str(research.get("location_hint", "")).isdigit() and int(research["location_hint"]) >= 2:
-        score += 4
-        reasons.append("mehrere Standorte")
+
+    employee_hint = clean_text(research.get("employee_hint", ""))
+    location_hint = clean_text(research.get("location_hint", ""))
+    fit_after_research, refined_small_score, refined_reason = classify_size_fit(
+        company=company,
+        job_count=len(jobs),
+        locations=max(1, _hint_number(location_hint) or 1),
+        segment=segment,
+        employee_hint=employee_hint,
+        current_score=small_score,
+    )
+    if fit_after_research == "Groß oder unpassend":
+        score -= 55
+        penalties.append("Recherche zeigt zu große Struktur")
+    elif fit_after_research == "Klein" and size_fit != "Klein":
+        score += 8
+        reasons.append("Recherche bestätigt KMU Fit")
 
     classification = likely_large_or_agency(company)
     if classification:
-        score -= 55
+        score -= 70
         penalties.append(classification)
 
     score = max(0, min(int(score), 100))
     status = "HOT" if score >= 75 else "WARM" if score >= 55 else "COLD"
-    explanation = reasons[:6] + [f"Abzug: {item}" for item in penalties[:2]]
+    explanation = reasons[:6] + [f"Abzug: {item}" for item in penalties[:3]]
     return status, score, ", ".join(explanation)
 
 
@@ -328,6 +507,7 @@ def build_discovery_leads(
     exclusions: set[str],
     existing: pd.DataFrame,
     scan_id: str,
+    focus: str = "Alle kleinen Direktkunden",
 ) -> tuple[pd.DataFrame, list[str]]:
     groups = _group_jobs(parsed_jobs, exclusions)
     existing = migrate_frame(existing)
@@ -338,6 +518,14 @@ def build_discovery_leads(
     for jobs in groups.values():
         company = clean_text(jobs[0].get("company", ""))
         if likely_large_or_agency(company):
+            skipped += 1
+            continue
+        lead_segment = clean_text(next((job.get("lead_segment", "") for job in jobs if job.get("lead_segment")), ""))
+        lead_segment = lead_segment or infer_lead_segment(" ".join([company] + [job.get("title", "") for job in jobs]))
+        size_fit = clean_text(next((job.get("size_fit", "") for job in jobs if job.get("size_fit")), "")) or "Mittel"
+        small_business_score = max([int(float(job.get("small_business_score", 0) or 0)) for job in jobs] or [50])
+        size_reason = clean_text(next((job.get("size_reason", "") for job in jobs if job.get("size_reason")), ""))
+        if size_fit == "Groß oder unpassend" or len(jobs) > 8:
             skipped += 1
             continue
         lid = lead_id(company)
@@ -377,6 +565,10 @@ def build_discovery_leads(
             "hot_status": hot_status,
             "lead_score": str(score),
             "discovery_score": str(score),
+            "lead_segment": lead_segment,
+            "size_fit": size_fit,
+            "small_business_score": str(small_business_score),
+            "size_reason": size_reason,
             "warum_hot": reason,
             "offene_stellen": grouped_jobs or " | ".join(titles[:6]),
             "job_titles": " | ".join(titles[:12]),
@@ -410,8 +602,8 @@ def build_discovery_leads(
 
     diagnostics = [
         f"Firmen aus Stellen gruppiert: {len(groups)}",
-        f"Direkt als Lead vorbereitet: {len(rows)}",
-        f"Vermittler oder Großunternehmen zusätzlich übersprungen: {skipped}",
+        f"Direkt als kleiner Lead vorbereitet: {len(rows)} ({focus})",
+        f"Vermittler, Ketten oder zu große Unternehmen zusätzlich übersprungen: {skipped}",
         "Kontaktdaten und Texte werden bewusst erst in Schritt 2 und 3 erzeugt.",
     ]
     return migrate_frame(pd.DataFrame(rows)), diagnostics
@@ -461,7 +653,11 @@ def upsert_leads(
 
     merged = migrate_frame(pd.DataFrame(existing_map.values()))
     merged["lead_score_num"] = pd.to_numeric(merged["lead_score"], errors="coerce").fillna(0)
-    merged = merged.sort_values(["lead_score_num", "firma"], ascending=[False, True]).drop(columns=["lead_score_num"])
+    merged["small_score_num"] = pd.to_numeric(merged["small_business_score"], errors="coerce").fillna(0)
+    merged = merged.sort_values(
+        ["small_score_num", "lead_score_num", "firma"],
+        ascending=[False, False, True],
+    ).drop(columns=["small_score_num", "lead_score_num"])
     return migrate_frame(merged), inserted, updated, changed_ids
 
 
@@ -479,6 +675,10 @@ def _row_jobs(row: dict[str, Any]) -> list[dict]:
             "description": "",
             "source": row.get("source_list", ""),
             "lead_score": row.get("discovery_score", row.get("lead_score", "20")),
+            "lead_segment": row.get("lead_segment", ""),
+            "size_fit": row.get("size_fit", ""),
+            "size_reason": row.get("size_reason", ""),
+            "small_business_score": row.get("small_business_score", "50"),
         })
     return jobs
 
@@ -492,12 +692,21 @@ def research_candidate_indices(frame: pd.DataFrame, limit: int) -> list[int]:
         | ((frame["email"] == "") & (frame["telefon"] == ""))
         | (frame["research_status"].isin(["", "offen", "nicht gefunden", "Fehler"]))
     )
-    candidates = frame[needs & (attempts < 3) & (~frame["status"].isin(["Ausschließen", "In Salesforce übernommen"]))].copy()
+    candidates = frame[
+        needs
+        & (attempts < 3)
+        & (~frame["status"].isin(["Ausschließen", "In Salesforce übernommen"]))
+        & (frame["size_fit"] != "Groß oder unpassend")
+    ].copy()
     if candidates.empty:
         return []
     candidates["score_num"] = score.loc[candidates.index]
+    candidates["small_num"] = pd.to_numeric(candidates["small_business_score"], errors="coerce").fillna(0)
     candidates["attempts_num"] = attempts.loc[candidates.index]
-    candidates = candidates.sort_values(["attempts_num", "score_num"], ascending=[True, False]).head(limit)
+    candidates = candidates.sort_values(
+        ["attempts_num", "small_num", "score_num"],
+        ascending=[True, False, False],
+    ).head(limit)
     return list(candidates.index)
 
 
@@ -565,7 +774,24 @@ def enrich_lead(
         "phone": item.get("telefon", ""),
         "website": item.get("website", ""),
         "location_hint": item.get("location_hint", ""),
+        "employee_hint": item.get("employee_hint", ""),
     }
+    segment = item.get("lead_segment", "") or infer_lead_segment(
+        " ".join([item.get("firma", ""), item.get("job_titles", ""), research.get("text", "")])
+    )
+    location_count = max(1, _hint_number(item.get("location_hint", "")) or len(split_pipe(item.get("orte", ""))) or 1)
+    fit, small_score, size_reason = classify_size_fit(
+        company=item.get("firma", ""),
+        job_count=max(1, int(float(item.get("anzahl_stellen", 1) or 1))),
+        locations=location_count,
+        segment=segment,
+        employee_hint=item.get("employee_hint", ""),
+        current_score=int(float(item.get("small_business_score", 0) or 0)),
+    )
+    item["lead_segment"] = segment
+    item["size_fit"] = fit
+    item["small_business_score"] = str(small_score)
+    item["size_reason"] = size_reason
     base = int(float(item.get("discovery_score", item.get("lead_score", 20)) or 20))
     status, score, reason = score_lead(
         item["firma"], jobs, research_for_score, benefits,
@@ -592,13 +818,22 @@ def ai_candidate_indices(frame: pd.DataFrame, limit: int, force: bool = False) -
         needs = frame["text_locked"] != "ja"
     else:
         needs = (~frame["ai_status"].str.startswith("KI erstellt", na=False)) & (frame["text_locked"] != "ja")
-    candidates = frame[needs & (attempts < 3) & (~frame["status"].isin(["Ausschließen", "In Salesforce übernommen"]))].copy()
+    candidates = frame[
+        needs
+        & (attempts < 3)
+        & (~frame["status"].isin(["Ausschließen", "In Salesforce übernommen"]))
+        & (frame["size_fit"] != "Groß oder unpassend")
+    ].copy()
     if candidates.empty:
         return []
     candidates["contact_num"] = ((candidates["email"] != "") | (candidates["telefon"] != "")).astype(int)
     candidates["score_num"] = score.loc[candidates.index]
+    candidates["small_num"] = pd.to_numeric(candidates["small_business_score"], errors="coerce").fillna(0)
     candidates["attempts_num"] = attempts.loc[candidates.index]
-    candidates = candidates.sort_values(["contact_num", "attempts_num", "score_num"], ascending=[False, True, False]).head(limit)
+    candidates = candidates.sort_values(
+        ["contact_num", "small_num", "attempts_num", "score_num"],
+        ascending=[False, False, True, False],
+    ).head(limit)
     return list(candidates.index)
 
 
