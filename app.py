@@ -8,20 +8,26 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+import pipeline as pipeline_module
 from pipeline import (
     ASSET_KEYS,
     COLUMNS,
+    JOB_COLUMNS,
     STATUSES,
     ai_candidate_indices,
     apply_crm_status,
+    backfill_jobs_from_leads,
     build_discovery_leads,
+    build_job_rows,
     clean_text,
     crm_match,
     enrich_lead,
     generate_lead_assets,
     migrate_frame,
+    migrate_jobs_frame,
     normalize_company,
     research_candidate_indices,
+    upsert_jobs,
     upsert_leads,
 )
 from sales_ai import openai_available
@@ -119,6 +125,134 @@ def _google_config_signature() -> str:
         client_email,
     ])
 
+KMU_SCHEMA_VERSION = "5.0.0"
+KMU_REQUIRED_COLUMNS = {
+    "lead_segment": "Kleiner Direktkunde",
+    "size_fit": "Mittel",
+    "small_business_score": "50",
+    "size_reason": "Bestandslead automatisch migriert",
+}
+
+
+def _safe_pipe_count(value: Any) -> int:
+    parts = [part.strip() for part in str(value or "").split("|") if part.strip()]
+    return max(1, len(parts))
+
+
+def _fallback_kmu_segment(row: pd.Series) -> str:
+    text = " ".join([
+        str(row.get("firma", "")),
+        str(row.get("job_titles", "")),
+        str(row.get("offene_stellen", "")),
+    ]).lower()
+    groups = [
+        ("Therapiepraxis", ("physio", "ergotherap", "logop", "sprachtherap", "therapie")),
+        ("Steuerkanzlei", ("steuerfach", "steuerberater", "steuerkanz", "bilanzbuch", "lohnbuch", "datev")),
+        ("Ambulante Pflege", ("ambulante pflege", "pflegedienst", "sozialstation", "tourenpflege")),
+        ("Arztpraxis", ("medizinische fachang", " mfa", "arztpraxis", "zahnarztpraxis", "zahnmedizin")),
+        ("Handwerk und Technik", ("elektroniker", "mechatron", "anlagenmechaniker", "shk", "servicetechn", "schwei", "metallbau", "tischler")),
+        ("Ingenieurbüro", ("ingenieur", "planungsbüro", "planungsbuero", "bauleiter", "konstrukteur", "tga")),
+        ("Kleines IT Unternehmen", ("softwareentwickler", "developer", "devops", "systemadministrator", "softwarehaus")),
+    ]
+    for segment, terms in groups:
+        if any(term in text for term in terms):
+            return segment
+    return "Kleiner Direktkunde"
+
+
+def _fallback_size_fit(row: pd.Series, segment: str) -> tuple[str, int, str]:
+    company = str(row.get("firma", "")).lower()
+    try:
+        jobs = max(1, int(float(row.get("anzahl_stellen", 1) or 1)))
+    except (TypeError, ValueError):
+        jobs = 1
+    locations = _safe_pipe_count(row.get("orte", ""))
+    large_tokens = (
+        "holding", "gruppe", "group", "konzern", "kliniken", "universitätsklinikum",
+        "deutsche bahn", "amazon", "siemens", "bosch", "lidl", "aldi", "rewe",
+        "telekom", "dhl", "bundeswehr", "stadt ", "landkreis",
+    )
+    score = 65
+    reasons = []
+    if jobs <= 3:
+        score += 20
+        reasons.append("1 bis 3 Stellen")
+    elif jobs <= 5:
+        score += 10
+        reasons.append("4 bis 5 Stellen")
+    elif jobs > 8:
+        score -= 55
+        reasons.append("mehr als 8 Stellen")
+    if locations == 1:
+        score += 10
+        reasons.append("ein Standort")
+    elif locations > 3:
+        score -= 35
+        reasons.append("mehr als 3 Standorte")
+    if segment in {"Therapiepraxis", "Steuerkanzlei", "Ambulante Pflege", "Arztpraxis", "Ingenieurbüro"}:
+        score += 10
+        reasons.append(segment)
+    if any(token in company for token in large_tokens):
+        score -= 60
+        reasons.append("Großstruktur erkannt")
+    score = max(0, min(100, score))
+    if jobs > 8 or locations > 3 or any(token in company for token in large_tokens) or score < 35:
+        fit = "Groß oder unpassend"
+    elif score >= 70:
+        fit = "Klein"
+    else:
+        fit = "Mittel"
+    return fit, score, "; ".join(reasons[:5])
+
+
+def ensure_kmu_schema(frame: pd.DataFrame | None) -> tuple[pd.DataFrame, bool]:
+    """Migriert alte Google-Sheets-Daten robust auf das KMU-Schema.
+
+    Der zweite Rückgabewert zeigt, ob Spalten oder Werte ergänzt wurden und das
+    Sheet einmalig zurückgeschrieben werden sollte.
+    """
+    result = frame.copy() if frame is not None else pd.DataFrame()
+    changed = False
+
+    for column in COLUMNS:
+        if column not in result.columns:
+            result[column] = ""
+            changed = True
+    for column, default in KMU_REQUIRED_COLUMNS.items():
+        if column not in result.columns:
+            result[column] = ""
+            changed = True
+
+    result = result.fillna("")
+    if result.empty:
+        ordered = list(dict.fromkeys(list(COLUMNS) + list(KMU_REQUIRED_COLUMNS)))
+        return result.reindex(columns=ordered), changed
+
+    for index, row in result.iterrows():
+        segment = str(row.get("lead_segment", "")).strip() or _fallback_kmu_segment(row)
+        if not str(row.get("lead_segment", "")).strip():
+            result.at[index, "lead_segment"] = segment
+            changed = True
+
+        fit_text = str(row.get("size_fit", "")).strip()
+        score_text = str(row.get("small_business_score", "")).strip()
+        reason_text = str(row.get("size_reason", "")).strip()
+        if not fit_text or not score_text or not reason_text:
+            fit, score, reason = _fallback_size_fit(row, segment)
+            if not fit_text:
+                result.at[index, "size_fit"] = fit
+                changed = True
+            if not score_text:
+                result.at[index, "small_business_score"] = str(score)
+                changed = True
+            if not reason_text:
+                result.at[index, "size_reason"] = reason
+                changed = True
+
+    ordered = list(dict.fromkeys(list(COLUMNS) + list(KMU_REQUIRED_COLUMNS)))
+    return result.reindex(columns=ordered).fillna("").astype(str), changed
+
+
 LOG_COLUMNS = [
     "timestamp",
     "scan_id",
@@ -189,6 +323,7 @@ class Storage:
         self.mode = "local"
         self.error = ""
         self.ws = None
+        self.jobs_ws = None
         self.exclusion_ws = None
         self.log_ws = None
         self.book_title = ""
@@ -196,8 +331,11 @@ class Storage:
         self.book_url = ""
         self.row_map: dict[str, int] = {}
         self.next_row = 2
+        self.job_row_map: dict[str, int] = {}
+        self.job_next_row = 2
         self._exclusions_cache: set[str] | None = None
         self.local_path = "leads_local.csv"
+        self.local_jobs_path = "stellen_local.csv"
         self.local_exclusion_path = "crm_ausschluss_local.csv"
         self.local_log_path = "scan_log_local.csv"
 
@@ -238,6 +376,7 @@ class Storage:
             self.book_url = f"https://docs.google.com/spreadsheets/d/{book.id}/edit"
             worksheets = {sheet.title: sheet for sheet in _google_call(book.worksheets)}
             self.ws = self._lead_sheet(book, worksheets, 12000, max(70, len(COLUMNS) + 5))
+            self.jobs_ws = self._sheet(book, worksheets, "Stellen", 50000, max(30, len(JOB_COLUMNS) + 3))
             self.exclusion_ws = self._sheet(book, worksheets, "CRM_Ausschluss", 12000, 5)
             self.log_ws = self._sheet(book, worksheets, "Scan_Log", 12000, len(LOG_COLUMNS) + 2)
             self.mode = "google"
@@ -274,7 +413,15 @@ class Storage:
     @staticmethod
     def _sheet(book, worksheets: dict[str, Any], title: str, rows: int, cols: int):
         if title in worksheets:
-            return worksheets[title]
+            sheet = worksheets[title]
+            try:
+                target_rows = max(int(getattr(sheet, "row_count", 0) or 0), rows)
+                target_cols = max(int(getattr(sheet, "col_count", 0) or 0), cols)
+                if target_rows != getattr(sheet, "row_count", 0) or target_cols != getattr(sheet, "col_count", 0):
+                    _google_call(sheet.resize, rows=target_rows, cols=target_cols)
+            except Exception:
+                pass
+            return sheet
         sheet = _google_call(book.add_worksheet, title=title, rows=rows, cols=cols)
         try:
             _google_call(sheet.freeze, rows=1)
@@ -379,6 +526,92 @@ class Storage:
             # Ein kompletter Fallback ist langsamer, aber verhindert Datenverlust,
             # falls sich die gspread Signatur ändert oder ein Batch fehlschlägt.
             self.save(full_frame)
+
+    def load_jobs(self) -> pd.DataFrame:
+        if self.mode == "google_error":
+            raise RuntimeError(self.error or "Google Sheets ist nicht verbunden.")
+        if self.mode == "local":
+            try:
+                return migrate_jobs_frame(pd.read_csv(self.local_jobs_path, dtype=str).fillna(""))
+            except FileNotFoundError:
+                return migrate_jobs_frame(pd.DataFrame())
+
+        values = _google_call(self.jobs_ws.get_all_values)
+        if not values:
+            _google_call(self.jobs_ws.update, [JOB_COLUMNS])
+            self.job_row_map = {}
+            self.job_next_row = 2
+            return migrate_jobs_frame(pd.DataFrame())
+
+        header = values[0]
+        frame = migrate_jobs_frame(pd.DataFrame(self._records(values)))
+        if header != JOB_COLUMNS:
+            self.save_jobs(frame)
+            return frame
+
+        self.job_row_map = {}
+        for index, record in enumerate(self._records(values), start=2):
+            job = clean_text(record.get("job_id", ""))
+            if job:
+                self.job_row_map[job] = index
+        self.job_next_row = max([1] + list(self.job_row_map.values())) + 1
+        return frame
+
+    def save_jobs(self, frame: pd.DataFrame) -> None:
+        frame = migrate_jobs_frame(frame)
+        if self.mode == "google_error":
+            raise RuntimeError(self.error or "Google Sheets ist nicht verbunden.")
+        if self.mode == "local":
+            frame.to_csv(self.local_jobs_path, index=False)
+            return
+
+        _google_call(self.jobs_ws.clear)
+        _google_call(self.jobs_ws.update, [JOB_COLUMNS] + frame.astype(str).values.tolist())
+        self.job_row_map = {
+            row["job_id"]: index
+            for index, (_, row) in enumerate(frame.iterrows(), start=2)
+            if row["job_id"]
+        }
+        self.job_next_row = len(frame) + 2
+
+    def upsert_job_rows(self, rows: pd.DataFrame, full_frame: pd.DataFrame) -> None:
+        rows = migrate_jobs_frame(rows)
+        full_frame = migrate_jobs_frame(full_frame)
+        if rows.empty:
+            return
+        if self.mode != "google":
+            self.save_jobs(full_frame)
+            return
+
+        end_column = _column_letter(len(JOB_COLUMNS))
+        updates: list[dict[str, Any]] = []
+        append_values: list[list[str]] = []
+        append_ids: list[str] = []
+        for _, row in rows.iterrows():
+            values = [str(row[column] or "") for column in JOB_COLUMNS]
+            jid = row["job_id"]
+            if jid in self.job_row_map:
+                sheet_row = self.job_row_map[jid]
+                updates.append({
+                    "range": f"A{sheet_row}:{end_column}{sheet_row}",
+                    "values": [values],
+                })
+            else:
+                append_values.append(values)
+                append_ids.append(jid)
+
+        try:
+            for start in range(0, len(updates), 100):
+                _google_call(self.jobs_ws.batch_update, updates[start : start + 100])
+            if append_values:
+                for start in range(0, len(append_values), 500):
+                    batch = append_values[start : start + 500]
+                    _google_call(self.jobs_ws.append_rows, batch, value_input_option="RAW")
+                for jid in append_ids:
+                    self.job_row_map[jid] = self.job_next_row
+                    self.job_next_row += 1
+        except Exception:
+            self.save_jobs(full_frame)
 
     def load_exclusions(self) -> set[str]:
         if self.mode == "google_error":
@@ -502,6 +735,38 @@ def persist_rows(rows: pd.DataFrame, frame: pd.DataFrame) -> None:
     frame = migrate_frame(frame)
     storage.upsert_rows(rows, frame)
     st.session_state["xing_frame_cache"] = frame.copy()
+
+
+def persist_job_rows(rows: pd.DataFrame, jobs_frame: pd.DataFrame) -> None:
+    rows = migrate_jobs_frame(rows)
+    jobs_frame = migrate_jobs_frame(jobs_frame)
+    storage.upsert_job_rows(rows, jobs_frame)
+    st.session_state["xing_jobs_cache"] = jobs_frame.copy()
+
+
+def sync_lead_contacts_to_jobs(lead_row: dict[str, Any], jobs_frame: pd.DataFrame) -> pd.DataFrame:
+    """Überträgt recherchierte Kontakte in alle Stellenzeilen derselben Firma."""
+    jobs_frame = migrate_jobs_frame(jobs_frame)
+    lid = clean_text(lead_row.get("lead_id", ""))
+    if not lid or jobs_frame.empty:
+        return migrate_jobs_frame(pd.DataFrame())
+    mask = jobs_frame["lead_id"] == lid
+    if not mask.any():
+        return migrate_jobs_frame(pd.DataFrame())
+    mapping = {
+        "email": clean_text(lead_row.get("email", "")),
+        "telefon": clean_text(lead_row.get("telefon", "")),
+        "ansprechpartner": clean_text(lead_row.get("ansprechpartner", "")),
+    }
+    changed = False
+    for column, value in mapping.items():
+        if value:
+            jobs_frame.loc[mask, column] = value
+            changed = True
+    if not changed:
+        return migrate_jobs_frame(pd.DataFrame())
+    st.session_state["xing_jobs_cache"] = jobs_frame.copy()
+    return jobs_frame.loc[mask].copy()
 
 
 def persist_exclusions(companies: set[str]) -> set[str]:
@@ -628,10 +893,10 @@ serpapi_key = str(st.secrets.get("serpapi_key", "")).strip()
 adzuna_app_id = str(st.secrets.get("adzuna_app_id", "")).strip()
 adzuna_api_key = str(st.secrets.get("adzuna_api_key", "")).strip()
 
-st.sidebar.title("XING Daily Leads V4.4 KMU")
+st.sidebar.title("XING Daily Leads V5")
 page = st.sidebar.radio(
     "Bereich",
-    ["Daily Leads", "Follow ups", "Alle Leads", "Salesforce Abgleich", "CRM Ausschluss"],
+    ["Daily Leads", "Stellen", "Follow ups", "Alle Leads", "Salesforce Abgleich", "CRM Ausschluss"],
 )
 
 st.sidebar.markdown("### Systemcheck")
@@ -659,6 +924,8 @@ st.sidebar.write(f"OpenAI Paket: {'bereit' if openai_available() else 'fehlt'}")
 st.sidebar.write(f"OpenAI Key: {'hinterlegt' if openai_api_key else 'fehlt'}")
 st.sidebar.write(f"SerpApi: {'hinterlegt' if serpapi_key else 'nicht hinterlegt'}")
 st.sidebar.write(f"Adzuna: {'bereit' if adzuna_app_id and adzuna_api_key else 'Zugangsdaten fehlen'}")
+st.sidebar.caption(f"KMU Schema: {KMU_SCHEMA_VERSION} · Pipeline: {getattr(pipeline_module, 'PIPELINE_SCHEMA_VERSION', 'älter')}")
+st.sidebar.caption("Google Sheets Tabs: Leads · Stellen · CRM_Ausschluss · Scan_Log")
 
 if storage.mode == "google_error":
     st.error(
@@ -669,27 +936,48 @@ if storage.mode == "google_error":
 
 if st.sidebar.button("Daten aus Google Sheets neu laden"):
     st.session_state.pop("xing_frame_cache", None)
+    st.session_state.pop("xing_jobs_cache", None)
     st.session_state.pop("xing_exclusions_cache", None)
     st.session_state.pop("xing_logs_cache", None)
     st.rerun()
 
 if "xing_frame_cache" not in st.session_state:
     st.session_state["xing_frame_cache"] = storage.load()
+if "xing_jobs_cache" not in st.session_state:
+    st.session_state["xing_jobs_cache"] = storage.load_jobs()
 if "xing_exclusions_cache" not in st.session_state:
     st.session_state["xing_exclusions_cache"] = storage.load_exclusions()
 if "xing_logs_cache" not in st.session_state:
     st.session_state["xing_logs_cache"] = storage.load_logs()
 
-frame = migrate_frame(st.session_state["xing_frame_cache"].copy())
+raw_frame = st.session_state["xing_frame_cache"].copy()
+frame = migrate_frame(raw_frame)
+jobs_frame = migrate_jobs_frame(st.session_state["xing_jobs_cache"].copy())
+frame, schema_changed = ensure_kmu_schema(frame)
 exclusions = set(st.session_state["xing_exclusions_cache"])
 logs = st.session_state["xing_logs_cache"].copy()
 
 if not frame.empty:
     legacy_mask = frame["first_seen_scan"].astype(str).str.strip().eq("")
-    if legacy_mask.any():
+    legacy_changed = bool(legacy_mask.any())
+    if legacy_changed:
         frame.loc[legacy_mask, "first_seen_scan"] = "legacy"
         frame.loc[legacy_mask & frame["scan_id"].astype(str).str.strip().eq(""), "scan_id"] = "legacy"
+    if schema_changed or legacy_changed:
         persist_full(frame)
+
+# Einmalige Migration für bestehende Firmen: So ist der Google Sheets Tab Stellen
+# nicht leer, obwohl frühere Versionen nur Firmen gespeichert haben.
+if jobs_frame.empty and not frame.empty:
+    reconstructed_jobs = backfill_jobs_from_leads(frame)
+    if not reconstructed_jobs.empty:
+        storage.save_jobs(reconstructed_jobs)
+        jobs_frame = reconstructed_jobs.copy()
+        st.session_state["xing_jobs_cache"] = jobs_frame.copy()
+        st.info(
+            f"Einmalig {len(jobs_frame)} Stellenzeilen aus bestehenden Leads rekonstruiert. "
+            "Neue Scans ersetzen diese schrittweise durch exakte Quelldaten."
+        )
 
 
 if page == "Daily Leads":
@@ -704,13 +992,14 @@ if page == "Daily Leads":
         & (frame["erstmail"] != "")
     ) if not frame.empty else pd.Series(dtype=bool)
 
-    metric_columns = st.columns(5)
+    metric_columns = st.columns(6)
     metric_columns[0].metric("Gespeicherte Firmen", len(frame))
-    small_count = int((frame["size_fit"] == "Klein").sum()) if not frame.empty else 0
-    metric_columns[1].metric("Kleine Direktkunden", small_count)
-    metric_columns[2].metric("Recherche offen", research_pending)
-    metric_columns[3].metric("Texte offen", ai_pending)
-    metric_columns[4].metric("Verkaufsbereit", int(ready_mask.sum()) if not frame.empty else 0)
+    metric_columns[1].metric("Gespeicherte Stellen", len(jobs_frame))
+    small_count = int((frame.get("size_fit", pd.Series(index=frame.index, dtype=str)) == "Klein").sum()) if not frame.empty else 0
+    metric_columns[2].metric("Kleine Direktkunden", small_count)
+    metric_columns[3].metric("Recherche offen", research_pending)
+    metric_columns[4].metric("Texte offen", ai_pending)
+    metric_columns[5].metric("Verkaufsbereit", int(ready_mask.sum()) if not frame.empty else 0)
 
     with st.expander("Schritt 1: Stellen finden und Firmen sofort speichern", expanded=frame.empty):
         st.write(
@@ -822,6 +1111,7 @@ if page == "Daily Leads":
 
             progress = st.progress(0, text="Suchrunde startet.")
             total_jobs = total_inserted = total_updated = 0
+            total_job_inserted = total_job_updated = 0
             details: list[str] = []
             completed_terms: list[str] = []
 
@@ -850,8 +1140,25 @@ if page == "Daily Leads":
                         ba_fetch_details=False,
                         focus=campaign,
                     )
+                    eligible_jobs = [
+                        job for job in parsed_jobs
+                        if not crm_match(clean_text(job.get("company", "")), exclusions)
+                    ]
+                    fresh_job_rows = build_job_rows(
+                        eligible_jobs,
+                        scan_id=scan_id,
+                        campaign=campaign,
+                    )
+                    jobs_frame, job_inserted, job_updated, changed_job_ids = upsert_jobs(
+                        jobs_frame,
+                        fresh_job_rows,
+                        scan_id=scan_id,
+                    )
+                    changed_job_rows = jobs_frame[jobs_frame["job_id"].isin(changed_job_ids)].copy()
+                    persist_job_rows(changed_job_rows, jobs_frame)
+
                     fresh, discovery_diagnostics = build_discovery_leads(
-                        parsed_jobs=parsed_jobs,
+                        parsed_jobs=eligible_jobs,
                         exclusions=exclusions,
                         existing=frame,
                         scan_id=scan_id,
@@ -862,11 +1169,17 @@ if page == "Daily Leads":
                     changed_rows = frame[frame["lead_id"].isin(changed_ids)].copy()
                     persist_rows(changed_rows, frame)
 
-                    total_jobs += len(parsed_jobs)
+                    total_jobs += len(eligible_jobs)
+                    total_job_inserted += job_inserted
+                    total_job_updated += job_updated
                     total_inserted += inserted
                     total_updated += updated
                     completed_terms.append(term)
-                    details.append(f"{term}: {len(parsed_jobs)} priorisierte Stellen, {inserted} neue Firmen, {updated} aktualisiert.")
+                    details.append(
+                        f"{term}: {len(eligible_jobs)} priorisierte Stellen nach CRM Abgleich, "
+                        f"{job_inserted} neue Stellenzeilen, {job_updated} Stellen aktualisiert, "
+                        f"{inserted} neue Firmen, {updated} Firmen aktualisiert."
+                    )
                     details.extend(f"{term}: {message}" for message in scan_diagnostics + discovery_diagnostics)
                     append_log(
                         scan_id=scan_id,
@@ -877,7 +1190,10 @@ if page == "Daily Leads":
                         found_jobs=str(total_jobs),
                         new_leads=str(total_inserted),
                         updated_leads=str(total_updated),
-                        message=f"{term} gespeichert.",
+                        message=(
+                            f"{term} gespeichert: {job_inserted} neue Stellen, "
+                            f"{job_updated} aktualisierte Stellen."
+                        ),
                     )
 
                 progress.progress(1.0, text="Suchrunde abgeschlossen und gespeichert.")
@@ -894,8 +1210,9 @@ if page == "Daily Leads":
                 )
                 st.session_state["last_pipeline_details"] = details
                 st.success(
-                    f"Gespeichert: {total_inserted} neue Firmen, {total_updated} aktualisiert, "
-                    f"{total_jobs} priorisierte Stellen."
+                    f"Gespeichert: {total_job_inserted} neue Stellenzeilen und {total_job_updated} aktualisierte Stellen "
+                    f"im Google Sheet Tab Stellen. Zusätzlich {total_inserted} neue Firmen und "
+                    f"{total_updated} aktualisierte Firmen im Tab Leads."
                 )
             except Exception as exc:
                 append_log(
@@ -941,6 +1258,10 @@ if page == "Daily Leads":
                 for column in COLUMNS:
                     frame.loc[index, column] = updated.get(column, frame.loc[index, column])
                 persist_rows(frame.loc[[index]], frame)
+                related_job_rows = sync_lead_contacts_to_jobs(frame.loc[index].to_dict(), jobs_frame)
+                if not related_job_rows.empty:
+                    jobs_frame = migrate_jobs_frame(st.session_state["xing_jobs_cache"].copy())
+                    persist_job_rows(related_job_rows, jobs_frame)
                 if frame.loc[index, "website"]:
                     websites += 1
                 if frame.loc[index, "email"] or frame.loc[index, "telefon"]:
@@ -1140,6 +1461,82 @@ if page == "Daily Leads":
                             st.success("Gespeichert.")
                         except Exception as exc:
                             st.error(_google_action_error(exc))
+
+elif page == "Stellen":
+    st.title("Stellen")
+    st.caption(
+        "Eine Zeile pro gefundener Vakanz. Dieselben Daten stehen dauerhaft im Google Sheets Tab Stellen."
+    )
+    if jobs_frame.empty:
+        st.info("Noch keine Stellen gespeichert. Starte in Daily Leads Schritt 1.")
+    else:
+        metric_columns = st.columns(4)
+        metric_columns[0].metric("Stellen", len(jobs_frame))
+        metric_columns[1].metric("Unternehmen", jobs_frame["firma"].nunique())
+        metric_columns[2].metric("Kleine Direktkunden", int((jobs_frame["size_fit"] == "Klein").sum()))
+        metric_columns[3].metric(
+            "Mit Kontakt",
+            int(((jobs_frame["email"] != "") | (jobs_frame["telefon"] != "")).sum()),
+        )
+
+        search = st.text_input("Stellen durchsuchen", key="jobs_search_v5")
+        filter_columns = st.columns(3)
+        campaigns = ["Alle"] + sorted([value for value in jobs_frame["kampagne"].unique() if value])
+        campaign_filter = filter_columns[0].selectbox("Kampagne", campaigns, key="jobs_campaign_v5")
+        size_options = ["Alle"] + sorted([value for value in jobs_frame["size_fit"].unique() if value])
+        size_filter = filter_columns[1].selectbox("Unternehmensgröße", size_options, key="jobs_size_v5")
+        source_values = sorted({
+            part.strip()
+            for value in jobs_frame["quelle"].astype(str)
+            for part in value.split("|")
+            if part.strip()
+        })
+        source_filter = filter_columns[2].selectbox("Quelle", ["Alle"] + source_values, key="jobs_source_v5")
+
+        filtered_jobs = jobs_frame.copy()
+        if search:
+            mask = filtered_jobs.astype(str).apply(
+                lambda column: column.str.contains(search, case=False, na=False)
+            ).any(axis=1)
+            filtered_jobs = filtered_jobs[mask]
+        if campaign_filter != "Alle":
+            filtered_jobs = filtered_jobs[filtered_jobs["kampagne"] == campaign_filter]
+        if size_filter != "Alle":
+            filtered_jobs = filtered_jobs[filtered_jobs["size_fit"] == size_filter]
+        if source_filter != "Alle":
+            filtered_jobs = filtered_jobs[
+                filtered_jobs["quelle"].str.contains(source_filter, case=False, na=False, regex=False)
+            ]
+
+        table_columns = [
+            "firma", "position", "ort", "veroeffentlicht_am", "quelle", "suchbegriff",
+            "stellenlink", "lead_segment", "size_fit", "small_business_score", "lead_score",
+            "ansprechpartner", "email", "telefon", "first_seen", "last_seen", "times_seen",
+            "kampagne", "status", "notiz",
+        ]
+        table = filtered_jobs.reindex(columns=table_columns).copy()
+        table["small_business_score"] = pd.to_numeric(
+            table["small_business_score"], errors="coerce"
+        ).fillna(0).astype(int)
+        table["lead_score"] = pd.to_numeric(table["lead_score"], errors="coerce").fillna(0).astype(int)
+        st.dataframe(
+            table,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "stellenlink": st.column_config.LinkColumn("Stellenanzeige"),
+                "small_business_score": st.column_config.NumberColumn("KMU Score", format="%d"),
+                "lead_score": st.column_config.NumberColumn("Sales Score", format="%d"),
+            },
+        )
+        st.caption(f"Angezeigt: {len(filtered_jobs)} von {len(jobs_frame)} Stellen.")
+        export_csv = filtered_jobs.reindex(columns=JOB_COLUMNS).to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "Stellen als CSV herunterladen",
+            export_csv,
+            file_name=f"xing_stellen_{date.today().isoformat()}.csv",
+            mime="text/csv",
+        )
 
 elif page == "Follow ups":
     st.title("Follow ups")

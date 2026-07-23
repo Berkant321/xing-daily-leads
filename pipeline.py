@@ -14,6 +14,8 @@ from research import normalize_company as research_normalize_company
 from research import research_company
 from sales_ai import ASSET_KEYS, create_sales_assets
 
+PIPELINE_SCHEMA_VERSION = "5.0.0"
+
 
 BENEFIT_PATTERNS = {
     "Homeoffice": [r"\bhomeoffice\b", r"\bremote\b", r"mobiles arbeiten"],
@@ -117,6 +119,34 @@ COLUMNS = [
     "notiz",
 ]
 
+JOB_COLUMNS = [
+    "job_id",
+    "lead_id",
+    "firma",
+    "position",
+    "ort",
+    "veroeffentlicht_am",
+    "quelle",
+    "suchbegriff",
+    "stellenlink",
+    "referenz",
+    "lead_segment",
+    "size_fit",
+    "small_business_score",
+    "lead_score",
+    "email",
+    "telefon",
+    "ansprechpartner",
+    "beschreibung",
+    "first_seen",
+    "last_seen",
+    "times_seen",
+    "scan_id",
+    "kampagne",
+    "status",
+    "notiz",
+]
+
 MANUAL_COLUMNS = ["status", "wiedervorlage", "notiz", "text_locked"]
 RESEARCH_COLUMNS = [
     "ansprechpartner", "rolle", "email", "telefon", "website", "kontaktseite",
@@ -156,6 +186,171 @@ def unique(values: list[Any]) -> list[str]:
 
 def split_pipe(value: str) -> list[str]:
     return [clean_text(item) for item in str(value or "").split("|") if clean_text(item)]
+
+
+def job_id(job: dict[str, Any]) -> str:
+    """Stabile ID pro Firma, Position und Ort.
+
+    Dieselbe Vakanz aus mehreren Quellen landet damit in nur einer Tabellenzeile.
+    """
+    key = "|".join([
+        normalize_company(clean_text(job.get("company", ""))),
+        re.sub(r"\W+", "", clean_text(job.get("title", "")).lower()),
+        re.sub(r"\W+", "", clean_text(job.get("city", "")).lower()),
+    ])
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:18]
+
+
+def migrate_jobs_frame(frame: pd.DataFrame | None) -> pd.DataFrame:
+    result = frame.copy() if frame is not None else pd.DataFrame()
+    for column in JOB_COLUMNS:
+        if column not in result.columns:
+            result[column] = ""
+    return result.reindex(columns=JOB_COLUMNS).fillna("").astype(str)
+
+
+def build_job_rows(
+    parsed_jobs: list[dict[str, Any]],
+    *,
+    scan_id: str,
+    campaign: str,
+) -> pd.DataFrame:
+    """Erzeugt eine echte Stellen-Tabelle: eine Zeile pro Vakanz."""
+    today = date.today().isoformat()
+    rows: list[dict[str, str]] = []
+    for job in parsed_jobs:
+        company = clean_text(job.get("company", ""))
+        title = clean_text(job.get("title", ""))
+        if not company or not title:
+            continue
+        row = {column: "" for column in JOB_COLUMNS}
+        row.update({
+            "job_id": job_id(job),
+            "lead_id": lead_id(company),
+            "firma": company,
+            "position": title,
+            "ort": clean_text(job.get("city", "")),
+            "veroeffentlicht_am": clean_text(job.get("published", "")),
+            "quelle": clean_text(job.get("source", "")),
+            "suchbegriff": clean_text(job.get("term", "")),
+            "stellenlink": clean_text(job.get("job_link", "") or job.get("external_url", "")),
+            "referenz": clean_text(job.get("reference", "")),
+            "lead_segment": clean_text(job.get("lead_segment", "")),
+            "size_fit": clean_text(job.get("size_fit", "")),
+            "small_business_score": str(job.get("small_business_score", "") or ""),
+            "lead_score": str(job.get("lead_score", "") or ""),
+            "email": clean_text(job.get("email", "")),
+            "telefon": clean_text(job.get("phone", "")),
+            "ansprechpartner": clean_text(job.get("contact", "")),
+            "beschreibung": clean_text(job.get("description", ""))[:3000],
+            "first_seen": today,
+            "last_seen": today,
+            "times_seen": "1",
+            "scan_id": scan_id,
+            "kampagne": campaign,
+            "status": "Neu",
+            "notiz": "",
+        })
+        rows.append(row)
+    return migrate_jobs_frame(pd.DataFrame(rows))
+
+
+def backfill_jobs_from_leads(leads: pd.DataFrame) -> pd.DataFrame:
+    """Rekonstruiert aus alten Firmenzeilen eine nutzbare Stellen-Tabelle.
+
+    Historische Einzelquellen lassen sich nicht vollständig zurückholen. Die Zeilen
+    werden deshalb klar als Bestandsimport gekennzeichnet; neue Scans liefern danach
+    die exakten Daten pro Vakanz.
+    """
+    leads = migrate_frame(leads)
+    rows: list[dict[str, Any]] = []
+    for _, lead in leads.iterrows():
+        company = clean_text(lead.get("firma", ""))
+        if not company:
+            continue
+        titles = split_pipe(lead.get("job_titles", ""))
+        if not titles:
+            continue
+        locations = split_pipe(lead.get("orte", ""))
+        location = locations[0] if locations else ""
+        for title in titles:
+            job = {
+                "company": company,
+                "title": title,
+                "city": location,
+                "published": clean_text(lead.get("veroeffentlicht_am", "")),
+                "source": clean_text(lead.get("source_list", "")) or "Bestandsimport",
+                "term": title,
+                "job_link": clean_text(lead.get("stellenlink", "")),
+                "reference": "",
+                "lead_segment": clean_text(lead.get("lead_segment", "")),
+                "size_fit": clean_text(lead.get("size_fit", "")),
+                "small_business_score": clean_text(lead.get("small_business_score", "")),
+                "lead_score": clean_text(lead.get("lead_score", "")),
+                "email": clean_text(lead.get("email", "")),
+                "phone": clean_text(lead.get("telefon", "")),
+                "contact": clean_text(lead.get("ansprechpartner", "")),
+                "description": "Aus bestehendem Lead rekonstruiert. Neue Scans ergänzen exakte Quelldaten.",
+            }
+            job_frame = build_job_rows(
+                [job],
+                scan_id=clean_text(lead.get("scan_id", "")) or "legacy",
+                campaign="Bestandsimport",
+            )
+            if job_frame.empty:
+                continue
+            row = job_frame.iloc[0].to_dict()
+            row["first_seen"] = clean_text(lead.get("first_seen", "")) or row["first_seen"]
+            row["last_seen"] = clean_text(lead.get("zuletzt_gefunden", "")) or row["last_seen"]
+            row["times_seen"] = clean_text(lead.get("times_seen", "")) or "1"
+            row["status"] = "Bestandsimport"
+            rows.append(row)
+    return migrate_jobs_frame(pd.DataFrame(rows)).drop_duplicates(subset=["job_id"], keep="last")
+
+
+def upsert_jobs(
+    existing: pd.DataFrame,
+    fresh: pd.DataFrame,
+    *,
+    scan_id: str,
+) -> tuple[pd.DataFrame, int, int, set[str]]:
+    """Fügt Stellen ohne Dubletten ein und bewahrt manuelle Felder."""
+    existing = migrate_jobs_frame(existing)
+    fresh = migrate_jobs_frame(fresh)
+    existing_map = {row["job_id"]: row.to_dict() for _, row in existing.iterrows() if row["job_id"]}
+    inserted = updated = 0
+    changed_ids: set[str] = set()
+
+    for _, fresh_row in fresh.iterrows():
+        item = fresh_row.to_dict()
+        jid = item["job_id"]
+        old = existing_map.get(jid)
+        if old:
+            item["first_seen"] = old.get("first_seen", "") or item["first_seen"]
+            item["status"] = old.get("status", "") or item["status"]
+            item["notiz"] = old.get("notiz", "")
+            old_times = int(float(old.get("times_seen", 0) or 0))
+            item["times_seen"] = str(old_times + (1 if old.get("scan_id") != scan_id else 0))
+            # Vorhandene Kontaktdaten bleiben erhalten, wenn die neue Quelle leer ist.
+            for column in ("email", "telefon", "ansprechpartner", "stellenlink", "beschreibung"):
+                if not item.get(column) and old.get(column):
+                    item[column] = old[column]
+            existing_map[jid] = item
+            updated += 1
+        else:
+            existing_map[jid] = item
+            inserted += 1
+        changed_ids.add(jid)
+
+    merged = migrate_jobs_frame(pd.DataFrame(existing_map.values()))
+    if not merged.empty:
+        merged["last_seen_sort"] = pd.to_datetime(merged["last_seen"], errors="coerce")
+        merged["score_sort"] = pd.to_numeric(merged["small_business_score"], errors="coerce").fillna(0)
+        merged = merged.sort_values(
+            ["last_seen_sort", "score_sort", "firma", "position"],
+            ascending=[False, False, True, True],
+        ).drop(columns=["last_seen_sort", "score_sort"])
+    return migrate_jobs_frame(merged), inserted, updated, changed_ids
 
 
 def detect_benefits(text: str) -> list[str]:
