@@ -1319,7 +1319,7 @@ if page == "Daily Leads":
     research_all = research_candidate_indices(frame, max(1, len(frame))) if not frame.empty else []
     with st.expander(f"Schritt 2: Website, Ansprechpartner, Mail und Telefon recherchieren ({len(research_all)} offen)"):
         st.write("Dieser Schritt bearbeitet nur bereits gespeicherte Firmen in kleinen Paketen.")
-        research_limit = st.number_input("Firmen pro Recherchepaket", 1, 20, 5, key="research_limit_v4")
+        research_limit = st.number_input("Firmen pro Recherchepaket", 1, 100, 20, key="research_limit_v7")
         if st.button("Schritt 2 starten", disabled=not research_all, key="start_research_v4"):
             indices = research_candidate_indices(frame, int(research_limit))
             run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -1412,7 +1412,7 @@ if page == "Daily Leads":
             st.caption("In dieser Browser Sitzung gibt es noch keine technischen Details.")
         current_logs = st.session_state.get("xing_logs_cache", pd.DataFrame(columns=LOG_COLUMNS))
         if not current_logs.empty:
-            st.dataframe(current_logs.tail(30), use_container_width=True, hide_index=True)
+            st.dataframe(current_logs.tail(30), width="stretch", hide_index=True)
 
     if frame.empty:
         st.info("Noch keine Leads vorhanden. Starte Schritt 1.")
@@ -1673,7 +1673,7 @@ elif page == "Stellen":
         table["lead_score"] = pd.to_numeric(table["lead_score"], errors="coerce").fillna(0).astype(int)
         st.dataframe(
             table,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "stellenlink": st.column_config.LinkColumn("Stellenanzeige"),
@@ -1733,7 +1733,7 @@ elif page == "Kampagnen Feedback":
         segment_table = pd.DataFrame(segment_rows).sort_values(
             ["Termine", "Positive Antworten", "Antwortquote"], ascending=[False, False, False]
         )
-        st.dataframe(segment_table, use_container_width=True, hide_index=True)
+        st.dataframe(segment_table, width="stretch", hide_index=True)
 
         st.subheader("Leistung nach Mailvariante")
         variant_rows = []
@@ -1751,7 +1751,7 @@ elif page == "Kampagnen Feedback":
         variant_table = pd.DataFrame(variant_rows).sort_values(
             ["Termine", "Antwortquote"], ascending=[False, False]
         )
-        st.dataframe(variant_table, use_container_width=True, hide_index=True)
+        st.dataframe(variant_table, width="stretch", hide_index=True)
 
         st.subheader("Letzte Rückmeldungen")
         feedback_table = sent[
@@ -1761,7 +1761,7 @@ elif page == "Kampagnen Feedback":
             ]
         ].copy()
         feedback_table = feedback_table.sort_values(["antwort_am", "versendet_am"], ascending=False)
-        st.dataframe(feedback_table.head(200), use_container_width=True, hide_index=True)
+        st.dataframe(feedback_table.head(200), width="stretch", hide_index=True)
 
 elif page == "Follow ups":
     st.title("Follow ups")
@@ -1811,7 +1811,7 @@ elif page == "Alle Leads":
     table["small_business_score"] = pd.to_numeric(table["small_business_score"], errors="coerce").fillna(0).astype(int)
     st.dataframe(
         table,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "website": st.column_config.LinkColumn("Website"),

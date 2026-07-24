@@ -1111,6 +1111,7 @@ def enrich_lead(
     source_urls = unique([
         item.get("website", ""), item.get("stellenlink", ""),
         item.get("karriereseite", ""), item.get("kontaktseite", ""),
+        *re.findall(r"https?://[^\s<>'\"]+", clean_text(item.get("job_context", ""))),
     ])
     attempts = int(float(item.get("research_attempts", 0) or 0)) + 1
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -1120,8 +1121,9 @@ def enrich_lead(
             company=item["firma"],
             city=city,
             source_urls=source_urls,
+            source_text=clean_text(item.get("job_context", "")),
             serpapi_key=serpapi_key,
-            max_pages=12,
+            max_pages=16,
         )
     except Exception as exc:
         item["research_attempts"] = str(attempts)

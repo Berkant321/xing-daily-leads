@@ -302,6 +302,7 @@ def _search_candidates_serpapi(
     queries = [
         f'"{company}" {city} offizielle Website Kontakt'.strip(),
         f'"{company}" {city} Impressum Telefonnummer E Mail'.strip(),
+        f'"{company}" {city} Personal Recruiting HR Geschäftsführer Ansprechpartner'.strip(),
     ]
     candidates: list[dict[str, str]] = []
     for query in queries:
@@ -437,6 +438,37 @@ def _page_company_score(text: str, title: str, company: str, city: str = "") -> 
     return score
 
 
+def _company_domain_guesses(company: str) -> list[str]:
+    """Erzeugt wenige plausible Domains und akzeptiert sie erst nach Inhaltsprüfung."""
+    tokens = company_tokens(company)
+    if not tokens:
+        return []
+    variants: list[str] = []
+    compact = "".join(tokens[:4])
+    hyphenated = "-".join(tokens[:4])
+    first_two = "".join(tokens[:2])
+    first_two_hyphen = "-".join(tokens[:2])
+    for value in (compact, hyphenated, first_two, first_two_hyphen, tokens[0]):
+        value = re.sub(r"[^a-z0-9-]", "", normalize(value).replace(" ", "-"))
+        if value and value not in variants:
+            variants.append(value)
+    urls: list[str] = []
+    for variant in variants[:3]:
+        for tld in ("de", "com", "at", "ch", "li"):
+            urls.append(f"https://www.{variant}.{tld}")
+    return urls[:8]
+
+
+def _hint_bundle(context: str) -> dict[str, list]:
+    context = clean_text(context)
+    people = extract_people(context) if context else []
+    return {
+        "emails": extract_emails("", context),
+        "phones": extract_phones("", context),
+        "people": people,
+    }
+
+
 def discover_official_website(
     company: str,
     city: str = "",
@@ -456,6 +488,23 @@ def discover_official_website(
     records.extend(_search_candidates_serpapi(session, company, city, serpapi_key, errors))
     if len(records) < 3:
         records.extend(_search_candidates_duckduckgo(session, company, city, errors))
+
+    # Suchtreffer von XING und LinkedIn werden nicht gecrawlt, ihre öffentlichen
+    # Titel und Snippets helfen aber bei Ansprechpartnern und Rollen.
+    search_context = " ".join(record.get("context", "") for record in records)
+    search_hints = _hint_bundle(search_context)
+
+    # Falls Suchdienste blockiert sind oder keine Treffer liefern, werden wenige
+    # plausible Domains getestet. Eine Übernahme erfolgt erst nach Namensprüfung.
+    existing_domains = {root_domain(record.get("url", "")) for record in records if record.get("url")}
+    has_public_candidate = any(
+        record.get("url") and not is_blocked_url(record.get("url", ""))
+        for record in records
+    )
+    if not has_public_candidate:
+        for guessed_url in _company_domain_guesses(company):
+            if root_domain(guessed_url) not in existing_domains:
+                records.append(_candidate_record(guessed_url, context=company, source="Domain Vermutung mit Inhaltsprüfung"))
 
     merged: dict[str, dict[str, str]] = {}
     for record in records:
@@ -491,7 +540,8 @@ def discover_official_website(
         context_score = _page_company_score(record.get("context", ""), "", company, city)
         if url_score < 0:
             continue
-        response, error = _safe_get(session, candidate, timeout=18)
+        candidate_timeout = 7 if "Domain Vermutung" in record.get("source", "") else 18
+        response, error = _safe_get(session, candidate, timeout=candidate_timeout)
         if error or not response:
             errors.append(f"{candidate}: {error}")
             continue
@@ -512,15 +562,18 @@ def discover_official_website(
         if score >= 75:
             break
 
-    # Die bisherige Grenze war für kleine Praxen und Kanzleien zu streng.
-    # Eine Website wird nur übernommen, wenn mindestens ein echter Namensbezug
-    # in Domain, Suchkontext oder Seiteninhalt vorhanden ist.
-    accepted = best_url if best_score >= 20 else ""
-    hints = {"emails": [], "phones": []}
+    # Eine Domain wird nur übernommen, wenn Domain, Suchkontext oder Seiteninhalt
+    # einen echten Bezug zum Firmennamen zeigen. Kleine Firmen haben oft kurze
+    # Websites, deshalb ist die Schwelle bewusst moderat.
+    accepted = best_url if best_score >= 18 else ""
+    hints = search_hints
     if accepted and best_record:
         context = best_record.get("context", "")
-        hints["emails"] = extract_emails("", context)
-        hints["phones"] = extract_phones("", f"{best_record.get('phone', '')} {context}")
+        hints["emails"] = list(dict.fromkeys(hints.get("emails", []) + extract_emails("", context)))
+        hints["phones"] = list(dict.fromkeys(
+            hints.get("phones", []) + extract_phones("", f"{best_record.get('phone', '')} {context}")
+        ))
+        hints["people"] = list(hints.get("people", []))
     return accepted, [item["url"] for item in unique], errors, hints
 
 def _same_site(url: str, homepage: str) -> bool:
@@ -757,11 +810,13 @@ def research_company(
     company: str,
     city: str = "",
     source_urls: Iterable[str] | None = None,
+    source_text: str = "",
     serpapi_key: str = "",
     max_pages: int = 12,
 ) -> dict[str, Any]:
     result = ResearchResult()
     session = _session()
+    source_hints = _hint_bundle(source_text)
     website, candidates, errors, search_hints = discover_official_website(
         company=company,
         city=city,
@@ -771,24 +826,47 @@ def research_company(
     )
     result.candidate_count = len(candidates)
     result.errors.extend(errors[:8])
+
+    combined_hint_emails = list(dict.fromkeys(source_hints.get("emails", []) + search_hints.get("emails", [])))
+    combined_hint_phones = list(dict.fromkeys(source_hints.get("phones", []) + search_hints.get("phones", [])))
+    combined_hint_people = list(source_hints.get("people", [])) + list(search_hints.get("people", []))
+    combined_hint_people.sort(key=lambda item: item[2], reverse=True)
+
+    # Website und öffentliche Suchhinweise werden sofort gespeichert. Viele
+    # Unternehmensseiten blockieren automatisierte Abrufe, obwohl die Domain stimmt.
+    result.website = website
+    result.phone = combined_hint_phones[0] if combined_hint_phones else ""
+    if combined_hint_people:
+        result.person, result.role, _ = combined_hint_people[0]
+    if website:
+        result.email = choose_email(combined_hint_emails, root_domain(website), result.person)
+    elif combined_hint_emails:
+        result.email = combined_hint_emails[0]
+
     if not website:
-        result.notes = "Keine ausreichend sicher passende Firmenwebsite gefunden."
+        result.status = "teilweise" if (result.email or result.phone or result.person) else "nicht gefunden"
+        result.notes = "Keine sicher passende Firmenwebsite gefunden."
+        if result.email or result.phone or result.person:
+            result.notes += " Kontakthinweise aus Stellenanzeige oder öffentlichen Suchtreffern übernommen."
         if errors:
             result.notes += " " + " | ".join(errors[:2])
         return result.as_dict()
 
     first, error = _safe_get(session, website, timeout=20)
     if error or not first:
-        result.notes = f"Website nicht erreichbar: {error}"
+        result.status = "teilweise"
+        result.notes = f"Website erkannt, Abruf aber blockiert oder nicht erreichbar: {error}."
+        if result.email or result.phone or result.person:
+            result.notes += " Öffentliche Kontakthinweise wurden trotzdem übernommen."
         return result.as_dict()
 
     website = homepage_from_url(first.url)
     result.website = website
     page_urls = collect_internal_pages(website, first.text, max_pages=max_pages)
 
-    all_emails: list[str] = list(search_hints.get("emails", []))
-    all_phones: list[str] = list(search_hints.get("phones", []))
-    all_people: list[tuple[str, str, int]] = []
+    all_emails: list[str] = list(dict.fromkeys(combined_hint_emails))
+    all_phones: list[str] = list(dict.fromkeys(combined_hint_phones))
+    all_people: list[tuple[str, str, int]] = list(combined_hint_people)
     all_texts: list[str] = []
     visited: set[str] = set()
 
