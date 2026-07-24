@@ -16,7 +16,7 @@ from urllib3.util.retry import Retry
 BA_API_BASE = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service"
 HEADERS = {
     "X-API-Key": "jobboerse-jobsuche",
-    "User-Agent": "Mozilla/5.0 (compatible; XING-Daily-Leads/3.0)",
+    "User-Agent": "Mozilla/5.0 (compatible; XING-Daily-Leads/6.0)",
     "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
 }
 
@@ -56,12 +56,14 @@ SMALL_BUSINESS_SIGNALS = {
     "praxis", "physiotherapie", "ergotherapie", "logopädie", "logopaedie",
     "sprachtherapie", "therapiezentrum", "gemeinschaftspraxis", "arztpraxis",
     "zahnarztpraxis", "steuerkanzlei", "steuerberater", "steuerberatung",
-    "kanzlei", "wirtschaftskanzlei", "pflegedienst", "ambulante pflege",
-    "sozialstation", "pflege zuhause", "meisterbetrieb", "tischlerei",
-    "schreinerei", "elektrotechnik", "haustechnik", "sanitär", "heizung",
-    "klimatechnik", "kältetechnik", "metallbau", "maschinenbau", "ingenieurbüro",
-    "ingenieurbuero", "planungsbüro", "planungsbuero", "architekturbüro",
-    "architekturbuero", "inhabergeführt", "inhabergefuehrt", "familienbetrieb",
+    "rechtsanwälte", "rechtsanwaelte", "wirtschaftskanzlei", "notariat",
+    "kanzlei", "pflegedienst", "ambulante pflege", "sozialstation",
+    "meisterbetrieb", "tischlerei", "schreinerei", "elektrotechnik",
+    "haustechnik", "sanitär", "heizung", "klimatechnik", "kältetechnik",
+    "metallbau", "maschinenbau", "anlagenbau", "ingenieurbüro", "planungsbüro",
+    "architekturbüro", "softwarehaus", "it dienstleister", "logistikdienstleister",
+    "spedition", "pharmaunternehmen", "labor", "familienunternehmen",
+    "inhabergeführt", "inhabergefuehrt", "familienbetrieb", "mittelstand",
 }
 
 # Signale für Konzerne, Ketten oder zentrale Recruiting-Strukturen.
@@ -86,65 +88,99 @@ SEGMENT_KEYWORDS = {
         "physio", "ergotherapeut", "ergotherapie", "logopä", "logopaed",
         "sprachtherap", "therapie", "praxis", "therapiezentrum",
     },
-    "Steuerkanzlei": {
+    "Steuer und Buchhaltung": {
         "steuerfach", "steuerberater", "steuerberatung", "steuerkanzlei",
-        "bilanzbuch", "lohnbuch", "finanzbuch", "datev", "kanzlei",
+        "bilanzbuch", "lohnbuch", "finanzbuch", "datev", "accounting",
     },
-    "Ambulante Pflege": {
-        "ambulante pflege", "pflegedienst", "sozialstation", "pflege zuhause",
-        "pflegefach", "altenpflege", "häusliche pflege", "haeusliche pflege",
+    "Recht und Kanzlei": {
+        "rechtsanw", "jurist", "wirtschaftskanzlei", "notar", "legal", "paralegal",
     },
-    "Arztpraxis": {
-        "medizinische fachang", "mfa", "arztpraxis", "zahnarztpraxis",
-        "zahnmedizin", "praxismanager", "praxisleitung",
+    "Pflege und Medizin": {
+        "ambulante pflege", "pflegedienst", "sozialstation", "pflegefach",
+        "altenpflege", "medizinische fachang", "mfa", "arztpraxis", "zahnarzt",
     },
     "Handwerk und Technik": {
         "elektroniker", "elektriker", "mechatron", "anlagenmechaniker", "shk",
-        "sanitär", "heizung", "klima", "kälte", "kaelte", "servicetechn",
-        "schweißer", "schweisser", "industriemechan", "metallbau", "tischler",
-        "schreiner", "dachdecker", "meisterbetrieb",
+        "sanitär", "heizung", "klima", "kälte", "servicetechn", "schweißer",
+        "metallbau", "tischler", "schreiner", "dachdecker", "meisterbetrieb",
     },
-    "Ingenieurbüro": {
-        "ingenieurbüro", "ingenieurbuero", "planungsbüro", "planungsbuero",
-        "bauleiter", "projektingenieur", "konstrukteur", "architekturbüro",
-        "architekturbuero", "projektleiter bau",
+    "Industrie und Produktion": {
+        "produktion", "maschinenbau", "anlagenbau", "industriemechan", "cnc",
+        "zerspan", "instandhalt", "qualitäts", "werkzeugmechan", "maschinenbedien",
     },
-    "Kleines IT Unternehmen": {
+    "Bau und Engineering": {
+        "ingenieurbüro", "ingenieurbuero", "planungsbüro", "bauleiter",
+        "projektingenieur", "konstrukteur", "architekt", "tga", "kalkulator", "polier",
+    },
+    "IT und Digitalisierung": {
         "softwareentwickler", "developer", "devops", "systemadministrator",
-        "it support", "softwarehaus", "it dienstleister",
+        "it support", "softwarehaus", "it dienstleister", "cloud", "data", "cyber",
     },
-    "Kleiner Direktkunde": set(),
+    "Vertrieb und Marketing": {
+        "vertrieb", "sales", "account manager", "business development", "marketing",
+        "performance marketing", "e commerce", "customer success",
+    },
+    "Logistik und Einkauf": {
+        "logistik", "lager", "spedition", "disponent", "berufskraft", "fahrer",
+        "einkauf", "supply chain", "fachkraft für lagerlogistik",
+    },
+    "Pharma und Forschung": {
+        "pharma", "labor", "chemie", "regulatory", "clinical", "apotheker",
+        "pta", "forschung", "wissenschaftler",
+    },
+    "Personal und Verwaltung": {
+        "personalreferent", "recruit", "human resources", "sachbearbeiter",
+        "assistenz", "office", "kaufmann", "kauffrau", "verwaltung",
+    },
+    "Gastronomie und Hotellerie": {
+        "gastronomie", "hotel", "restaurant", "koch", "küche", "rezeption", "servicekraft",
+    },
+    "Direktkunde": set(),
 }
 
+_ALL_SEGMENTS = set(SEGMENT_KEYWORDS)
+
 FOCUS_SEGMENTS = {
-    "Alle kleinen Direktkunden": {
-        "Therapiepraxis", "Steuerkanzlei", "Ambulante Pflege", "Arztpraxis",
-        "Handwerk und Technik", "Ingenieurbüro", "Kleines IT Unternehmen",
-        "Kleiner Direktkunde",
-    },
+    "Breite Massenkampagne": _ALL_SEGMENTS,
+    "Alle Direktkunden": _ALL_SEGMENTS,
+    "Alle kleinen Direktkunden": _ALL_SEGMENTS,
     "Therapiepraxen": {"Therapiepraxis"},
-    "Steuerkanzleien": {"Steuerkanzlei"},
-    "Ambulante Pflege": {"Ambulante Pflege"},
-    "Arztpraxen": {"Arztpraxis"},
+    "Steuerkanzleien": {"Steuer und Buchhaltung"},
+    "Recht und Kanzleien": {"Recht und Kanzlei"},
+    "Ambulante Pflege": {"Pflege und Medizin"},
+    "Arztpraxen": {"Pflege und Medizin"},
     "Handwerk und Technik": {"Handwerk und Technik"},
-    "Kleine Ingenieurbüros": {"Ingenieurbüro"},
-    "Kleine IT Unternehmen": {"Kleines IT Unternehmen"},
+    "Industrie und Produktion": {"Industrie und Produktion"},
+    "Kleine Ingenieurbüros": {"Bau und Engineering"},
+    "Bau und Engineering": {"Bau und Engineering"},
+    "Kleine IT Unternehmen": {"IT und Digitalisierung"},
+    "IT und Digitalisierung": {"IT und Digitalisierung"},
+    "Vertrieb und Marketing": {"Vertrieb und Marketing"},
+    "Logistik und Einkauf": {"Logistik und Einkauf"},
+    "Pharma und Forschung": {"Pharma und Forschung"},
+    "Personal und Verwaltung": {"Personal und Verwaltung"},
 }
 
 TARGET_KEYWORDS = {
-    "physio": 24, "ergotherapeut": 24, "ergotherapie": 24, "logopä": 24,
-    "sprachtherap": 24, "pflegefach": 22, "ambulante pflege": 24, "pflege": 20,
-    "steuerfach": 23, "steuerkanzlei": 22, "bilanzbuchhalter": 20,
-    "lohnbuchhalter": 19, "elektriker": 18, "elektroniker": 18,
-    "anlagenmechaniker": 18, "shk": 18, "sanitär": 17, "heizung": 17,
-    "klima": 17, "metallbau": 16, "schweißer": 16, "zerspan": 17,
-    "cnc": 17, "mechatroniker": 17, "tischler": 16, "schreiner": 16,
-    "dachdecker": 16, "maler": 15, "bauleiter": 18, "projektleiter": 16,
-    "konstrukteur": 16, "ingenieur": 15, "softwareentwickler": 15,
-    "it administrator": 15, "systemadministrator": 15, "vertrieb": 12,
-    "sales": 12, "produktion": 12, "maschinenbediener": 14, "zahnarzt": 17,
-    "zahnmedizin": 18, "medizinische fachangestellte": 18, "mfa": 17,
-    "praxis": 12, "therapie": 18, "servicetechniker": 16,
+    "physio": 24, "ergotherapeut": 24, "logopä": 24, "therapie": 18,
+    "pflegefach": 22, "ambulante pflege": 24, "medizinische fachangestellte": 18,
+    "steuerfach": 23, "bilanzbuchhalter": 20, "lohnbuchhalter": 19, "controller": 16,
+    "rechtsanwalt": 18, "rechtsanwaltsfach": 20, "jurist": 17, "legal": 14,
+    "elektriker": 18, "elektroniker": 18, "anlagenmechaniker": 18, "mechatroniker": 17,
+    "servicetechniker": 16, "schweißer": 16, "zerspan": 17, "cnc": 17,
+    "industriemechaniker": 17, "produktion": 12, "maschinenbediener": 14,
+    "bauleiter": 18, "projektleiter": 16, "konstrukteur": 16, "ingenieur": 15,
+    "kalkulator": 17, "tga": 16, "architekt": 14,
+    "softwareentwickler": 17, "developer": 15, "devops": 16, "systemadministrator": 17,
+    "it support": 14, "data engineer": 15, "cloud": 14, "cyber security": 16,
+    "vertrieb": 15, "sales": 15, "account manager": 16, "business development": 15,
+    "marketing": 13, "performance marketing": 16, "customer success": 14,
+    "logistik": 14, "lager": 13, "disponent": 16, "berufskraftfahrer": 16,
+    "spedition": 15, "einkäufer": 15, "supply chain": 14,
+    "pharma": 16, "laborant": 17, "chemielaborant": 17, "regulatory": 18,
+    "clinical research": 17, "apotheker": 17, "pta": 16,
+    "personalreferent": 15, "recruiter": 15, "sachbearbeiter": 11,
+    "assistenz": 11, "industriekaufmann": 12, "büromanagement": 11,
 }
 
 BUYING_SIGNALS = {
@@ -849,6 +885,7 @@ def _small_business_profile(
     job_count = int(company_data.get("job_count", 1) or 1)
     distinct_titles = int(company_data.get("distinct_titles", 1) or 1)
     location_count = int(company_data.get("location_count", 1) or 1)
+    broad_mode = focus in {"Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden"}
 
     small_hits = [keyword for keyword in SMALL_BUSINESS_SIGNALS if _norm(keyword) in normal]
     enterprise_hits = [keyword for keyword in ENTERPRISE_SIGNALS if _norm(keyword) in normal]
@@ -856,80 +893,90 @@ def _small_business_profile(
     employee_count = _number_size_signal(description)
 
     reasons: list[str] = []
-    score = 42
+    score = 50 if broad_mode else 42
     if small_hits:
-        score += min(28, 12 + len(small_hits) * 4)
-        reasons.append("KMU Signal: " + ", ".join(small_hits[:3]))
-    if segment != "Kleiner Direktkunde":
+        score += min(24, 10 + len(small_hits) * 3)
+        reasons.append("Direktkunden Signal: " + ", ".join(small_hits[:3]))
+    if segment != "Direktkunde":
         score += 10
         reasons.append("Segment: " + segment)
 
     if job_count <= 3:
         score += 18
-        reasons.append(f"nur {job_count} offene Stelle" + ("n" if job_count != 1 else ""))
-    elif job_count <= 5:
-        score += 8
-        reasons.append(f"überschaubare {job_count} Stellen")
+        reasons.append(f"{job_count} konkrete Stelle" + ("n" if job_count != 1 else ""))
     elif job_count <= 8:
-        score -= 8
+        score += 8
+        reasons.append(f"{job_count} offene Stellen")
+    elif job_count <= 15 and broad_mode:
+        score += 1
+    elif job_count <= 25 and broad_mode:
+        score -= 10
     else:
         score -= 50
 
     if location_count <= 1:
         score += 10
         reasons.append("ein Standort")
-    elif location_count == 2:
+    elif location_count <= 3:
         score += 3
-    elif location_count == 3:
-        score -= 10
+    elif location_count <= 6 and broad_mode:
+        score -= 5
+    elif location_count <= 12 and broad_mode:
+        score -= 15
     else:
         score -= 45
 
     if distinct_titles == 1:
         score += 7
-    elif distinct_titles <= 3:
+    elif distinct_titles <= 4:
         score += 3
-    elif distinct_titles >= 6:
+    elif distinct_titles <= 10 and broad_mode:
+        score -= 5
+    else:
         score -= 30
 
     if employee_count:
         if employee_count <= 50:
             score += 12
             reasons.append(f"ca. {employee_count} Mitarbeitende")
-        elif employee_count <= 200:
-            score += 2
-        elif employee_count > 500:
+        elif employee_count <= 250:
+            score += 4
+        elif employee_count <= 1000 and broad_mode:
+            score -= 4
+        elif employee_count <= 3000 and broad_mode:
+            score -= 18
+        else:
             score -= 55
             enterprise_hits.append(f"{employee_count} Mitarbeitende")
-        else:
-            score -= 18
 
     if enterprise_hits:
-        score -= min(60, 22 + len(enterprise_hits) * 12)
+        score -= min(55, 14 + len(enterprise_hits) * 9)
     if chain_hits:
-        score -= min(45, 15 + len(chain_hits) * 10)
+        score -= min(35, 8 + len(chain_hits) * 7)
 
-    allowed_segments = FOCUS_SEGMENTS.get(focus, FOCUS_SEGMENTS["Alle kleinen Direktkunden"])
+    allowed_segments = FOCUS_SEGMENTS.get(focus, FOCUS_SEGMENTS["Breite Massenkampagne"])
     focus_match = segment in allowed_segments
-    if focus != "Alle kleinen Direktkunden" and not focus_match:
+    if not broad_mode and not focus_match:
         score -= 45
 
     hard_reasons: list[str] = []
-    if job_count > 8:
+    if job_count > (30 if broad_mode else 8):
         hard_reasons.append(f"{job_count} Stellen")
-    if location_count > 3:
+    if location_count > (12 if broad_mode else 3):
         hard_reasons.append(f"{location_count} Standorte")
-    if distinct_titles > 6:
+    if distinct_titles > (15 if broad_mode else 6):
         hard_reasons.append(f"{distinct_titles} unterschiedliche Rollen")
-    if employee_count > 500:
+    if employee_count > (3000 if broad_mode else 500):
         hard_reasons.append(f"{employee_count} Mitarbeitende")
-    if len(enterprise_hits) >= 2 or chain_hits:
+    if not broad_mode and (len(enterprise_hits) >= 2 or chain_hits):
         hard_reasons.append("Konzern oder Kettenstruktur")
-    if focus != "Alle kleinen Direktkunden" and not focus_match:
+    if broad_mode and len(enterprise_hits) >= 4:
+        hard_reasons.append("deutliche Konzernstruktur")
+    if not broad_mode and not focus_match:
         hard_reasons.append("passt nicht zur gewählten Kampagne")
 
     score = max(0, min(100, score))
-    if hard_reasons or score < 35:
+    if hard_reasons or score < (25 if broad_mode else 35):
         size_fit = "Groß oder unpassend"
     elif score >= 70:
         size_fit = "Klein"
@@ -1060,7 +1107,8 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
         # Der KMU Fit hat mehr Gewicht als reine Stellenmenge.
         score += round((int(profile["small_business_score"]) - 50) * 0.45)
         score = max(0, min(100, score))
-        if score < max(MIN_LEAD_SCORE, 30):
+        minimum_score = 22 if focus in {"Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden"} else max(MIN_LEAD_SCORE, 30)
+        if score < minimum_score:
             excluded["low_score"] += 1
             continue
 
@@ -1087,7 +1135,7 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
         reverse=True,
     )
     diagnostics.append(
-        f"KMU Filter ({focus}): {len(unique)} eindeutige Stellen geprüft, {len(output)} kleine Direktkunden priorisiert. "
+        f"Direktkunden Filter ({focus}): {len(unique)} eindeutige Stellen geprüft, {len(output)} Direktkunden priorisiert. "
         f"Raus: Staffing {excluded['staffing']}, öffentlich {excluded['public']}, bekannte Großunternehmen {excluded['large_name']}, "
         f"zu groß oder Kette {excluded['oversize']}, Kampagne {excluded['focus']}, Score {excluded['low_score']}."
     )
@@ -1124,5 +1172,5 @@ def scan_jobs(
     if "Karriereseiten" in sources:
         jobs.extend(scan_career_urls(career_urls or [], diagnostics))
     filtered = score_and_filter(jobs, diagnostics, focus=focus)
-    diagnostics.append(f"Gesamt: {len(filtered)} KMU priorisierte Stellen für {focus} aus {len(sources)} aktivierten Quellen am {date.today().isoformat()}.")
+    diagnostics.append(f"Gesamt: {len(filtered)} priorisierte Direktkunden Stellen für {focus} aus {len(sources)} aktivierten Quellen am {date.today().isoformat()}.")
     return filtered, diagnostics

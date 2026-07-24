@@ -84,7 +84,11 @@ ROLE_SCORES = {
     "talent acquisition": 100,
     "recruiting": 98,
     "recruiter": 96,
+    "people and culture": 95,
+    "people & culture": 95,
+    "head of people": 95,
     "head of hr": 94,
+    "hr business partner": 93,
     "hr manager": 92,
     "personalleitung": 92,
     "personalleiter": 92,
@@ -93,24 +97,28 @@ ROLE_SCORES = {
     "human resources": 86,
     "ansprechpartner bewerbung": 84,
     "ansprechpartner karriere": 84,
-    "praxisinhaber": 78,
-    "kanzleiinhaber": 78,
-    "geschäftsführer": 76,
-    "geschäftsführung": 74,
-    "inhaber": 72,
+    "praxisinhaber": 80,
+    "kanzleiinhaber": 80,
+    "geschäftsführer": 78,
+    "geschäftsführung": 76,
+    "geschäftsleitung": 75,
+    "inhaber": 74,
+    "partner": 72,
     "vertreten durch": 68,
 }
 
 ROLE_PATTERN = (
     r"Talent\s+Acquisition(?:\s+Manager)?|Recruiting(?:\s+Manager)?|Recruiter(?:in)?|"
+    r"People\s*(?:&|and)\s*Culture|Head\s+of\s+People|HR\s+Business\s+Partner|"
     r"Head\s+of\s+HR|HR\s+Manager(?:in)?|Human\s+Resources|"
     r"Personalleiter(?:in)?|Personalleitung|Leiter(?:in)?\s+(?:des\s+)?Personal(?:wesens)?|"
     r"Personalreferent(?:in)?|Ansprechpartner(?:in)?\s+(?:für\s+)?(?:Bewerbung(?:en)?|Karriere|Personal)|"
-    r"Praxisinhaber(?:in)?|Kanzleiinhaber(?:in)?|Geschäftsführer(?:in)?|Geschäftsführung|"
-    r"Inhaber(?:in)?|Vertreten\s+durch"
+    r"Praxisinhaber(?:in)?|Kanzleiinhaber(?:in)?|Geschäftsführer(?:in)?|Geschäftsführung|Geschäftsleitung|"
+    r"Inhaber(?:in)?|Partner(?:in)?|Vertreten\s+durch"
 )
 
 NAME_PATTERN = (
+    r"(?:(?:Frau|Herr)\s+)?"
     r"(?:Dr\.?\s+|Prof\.?\s+|Dipl\.?[-\s]?[A-Za-zÄÖÜäöüß]+\s+)?"
     r"[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’.-]{1,30}"
     r"(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’.-]{1,30}){1,3}"
@@ -588,26 +596,39 @@ def extract_emails(html_text: str, page_text: str = "") -> list[str]:
     return output
 
 
-def choose_email(emails: Iterable[str], website_domain: str) -> str:
+def choose_email(emails: Iterable[str], website_domain: str, person: str = "") -> str:
     domain = root_domain(website_domain) or website_domain.lower().lstrip("www.")
+    person_tokens = [
+        token for token in normalize(person).split()
+        if token not in {"frau", "herr", "dr", "prof", "dipl"} and len(token) >= 2
+    ]
+    first_name = person_tokens[0] if person_tokens else ""
+    last_name = person_tokens[-1] if person_tokens else ""
     best = ""
     best_score = -999
     for email in emails:
         local, _, email_domain = email.lower().partition("@")
         if not local or not email_domain:
             continue
+        local_norm = normalize(local).replace(" ", "")
         score = 0
         if root_domain("https://" + email_domain) == domain or email_domain == domain:
             score += 45
+        else:
+            score -= 35
         if local in BAD_EMAIL_PREFIXES or any(local.startswith(item) for item in BAD_EMAIL_PREFIXES):
             score -= 150
+        if last_name and last_name in local_norm:
+            score += 125
+            if first_name and (first_name in local_norm or local_norm.startswith(first_name[:1] + last_name)):
+                score += 35
         for prefix, points in EMAIL_PREFIX_SCORES.items():
             if local == prefix or local.startswith(prefix + ".") or local.startswith(prefix + "-"):
                 score += points
         if "." in local and not any(char.isdigit() for char in local):
-            score += 18
-        if local.startswith("info"):
-            score += 8
+            score += 25
+        if local.startswith("info") or local.startswith("kontakt"):
+            score -= 15
         if score > best_score:
             best_score = score
             best = email
@@ -644,7 +665,7 @@ def _valid_person(name: str) -> bool:
         "gmbh", "gesellschaft", "team", "kontakt", "karriere", "personal",
         "impressum", "telefon", "email", "deutschland", "geschäftsführung",
     }
-    normalized_parts = {normalize(part) for part in parts}
+    normalized_parts = {normalize(part) for part in parts if normalize(part) not in {"frau", "herr", "dr", "prof"}}
     if normalized_parts & bad:
         return False
     return sum(1 for part in parts if re.match(r"^(?:Dr\.?|Prof\.?)$|^[A-ZÄÖÜ]", part)) >= 2
@@ -807,12 +828,13 @@ def research_company(
 
     combined_text = " ".join(all_texts)
     result.text = combined_text[:45000]
-    result.email = choose_email(all_emails, root_domain(website))
     result.phone = all_phones[0] if all_phones else ""
 
     if all_people:
         all_people.sort(key=lambda item: item[2], reverse=True)
         result.person, result.role, _ = all_people[0]
+
+    result.email = choose_email(all_emails, root_domain(website), result.person)
 
     result.employee_hint = extract_employee_hint(combined_text)
     result.location_hint = extract_location_hint(combined_text)

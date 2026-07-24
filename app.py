@@ -22,11 +22,13 @@ from pipeline import (
     clean_text,
     crm_match,
     enrich_lead,
+    evaluate_lead_quality,
     generate_lead_assets,
     migrate_frame,
     migrate_jobs_frame,
     normalize_company,
     research_candidate_indices,
+    refresh_quality,
     upsert_jobs,
     upsert_leads,
 )
@@ -50,7 +52,7 @@ st.set_page_config(
 
 
 CAMPAIGN_PRESETS = {
-    "Alle kleinen Direktkunden": [
+    "Breite Massenkampagne": [
         # Bewusst gemischt sortiert, damit schon das erste Paket mehrere Branchen liefert.
         "Physiotherapeut", "Steuerfachangestellte", "Elektroniker", "Softwareentwickler",
         "Pflegefachkraft", "Vertriebsmitarbeiter", "Bauleiter", "Medizinische Fachangestellte",
@@ -89,7 +91,7 @@ CAMPAIGN_PRESETS = {
         "Steuerfachangestellte", "Steuerfachwirt", "Bilanzbuchhalter",
         "Lohnbuchhalter", "Finanzbuchhalter", "Steuerberater",
     ],
-    "Rechtskanzleien": [
+    "Recht und Kanzleien": [
         "Rechtsanwaltsfachangestellte", "Rechtsanwalt", "Rechtsanwaltsanwärter",
         "Notarfachangestellte", "Patentanwaltsfachangestellte", "Legal Counsel",
     ],
@@ -118,32 +120,39 @@ CAMPAIGN_PRESETS = {
         "Softwareentwickler", "Systemadministrator", "DevOps Engineer",
         "IT Support", "IT Administrator", "Fachinformatiker", "SAP Berater",
     ],
-    "Logistik und Transport": [
+    "Logistik und Einkauf": [
         "Berufskraftfahrer", "Disponent", "Speditionskaufmann", "Lagerist",
         "Fachkraft für Lagerlogistik", "Logistikmitarbeiter", "Fuhrparkleiter",
     ],
-    "Vertrieb und Kaufmännisch": [
+    "Vertrieb und Marketing": [
         "Vertriebsmitarbeiter", "Sales Manager", "Account Manager", "Key Account Manager",
         "Außendienstmitarbeiter", "Business Development Manager", "Sachbearbeiter", "Einkäufer",
     ],
-    "Pharma und Labor": [
+    "Pharma und Forschung": [
         "Laborant", "Chemielaborant", "Pharmakant", "Regulatory Affairs Manager",
         "Clinical Research Associate", "Apotheker", "PTA",
+    ],
+    "Personal und Verwaltung": [
+        "Personalreferent", "Recruiter", "HR Business Partner", "Sachbearbeiter",
+        "Assistenz der Geschäftsführung", "Kaufmann für Büromanagement", "Industriekaufmann",
     ],
 }
 
 
 DEFAULT_REGIONS = [
-    ("Münster", 120),
-    ("Osnabrück", 120),
-    ("Dortmund", 120),
-    ("Bielefeld", 120),
-    ("Düsseldorf", 100),
-    ("Köln", 100),
-    ("Hannover", 120),
-    ("Bremen", 120),
+    ("Hamburg", 180),
+    ("Bremen", 160),
+    ("Hannover", 180),
+    ("Münster", 180),
+    ("Dortmund", 150),
+    ("Köln", 150),
+    ("Frankfurt am Main", 180),
+    ("Stuttgart", 180),
+    ("Nürnberg", 180),
+    ("München", 200),
+    ("Leipzig", 180),
+    ("Berlin", 200),
 ]
-
 
 
 def _secret_text(name: str, default: str = "") -> str:
@@ -169,7 +178,7 @@ def _google_config_signature() -> str:
         client_email,
     ])
 
-KMU_SCHEMA_VERSION = "5.1.0"
+KMU_SCHEMA_VERSION = "6.0.0"
 
 
 def exclusive_invitation_subject(company: Any) -> str:
@@ -191,7 +200,7 @@ def ensure_exclusive_subjects(frame: pd.DataFrame | None) -> tuple[pd.DataFrame,
             changed = True
     return result, changed
 KMU_REQUIRED_COLUMNS = {
-    "lead_segment": "Kleiner Direktkunde",
+    "lead_segment": "Direktkunde",
     "size_fit": "Mittel",
     "small_business_score": "50",
     "size_reason": "Bestandslead automatisch migriert",
@@ -221,7 +230,7 @@ def _fallback_kmu_segment(row: pd.Series) -> str:
     for segment, terms in groups:
         if any(term in text for term in terms):
             return segment
-    return "Kleiner Direktkunde"
+    return "Direktkunde"
 
 
 def _fallback_size_fit(row: pd.Series, segment: str) -> tuple[str, int, str]:
@@ -957,10 +966,10 @@ serpapi_key = str(st.secrets.get("serpapi_key", "")).strip()
 adzuna_app_id = str(st.secrets.get("adzuna_app_id", "")).strip()
 adzuna_api_key = str(st.secrets.get("adzuna_api_key", "")).strip()
 
-st.sidebar.title("XING Daily Leads V5")
+st.sidebar.title("XING Daily Leads V6")
 page = st.sidebar.radio(
     "Bereich",
-    ["Daily Leads", "Stellen", "Follow ups", "Alle Leads", "Salesforce Abgleich", "CRM Ausschluss"],
+    ["Daily Leads", "Stellen", "Kampagnen Feedback", "Follow ups", "Alle Leads", "Salesforce Abgleich", "CRM Ausschluss"],
 )
 
 st.sidebar.markdown("### Systemcheck")
@@ -990,10 +999,10 @@ st.sidebar.write(f"SerpApi: {'hinterlegt' if serpapi_key else 'nicht hinterlegt'
 st.sidebar.write(f"Adzuna: {'bereit' if adzuna_app_id and adzuna_api_key else 'Zugangsdaten fehlen'}")
 active_schema_version = globals().get(
     "KMU_SCHEMA_VERSION",
-    getattr(pipeline_module, "PIPELINE_SCHEMA_VERSION", "5.0.1"),
+    getattr(pipeline_module, "PIPELINE_SCHEMA_VERSION", "6.0.0"),
 )
 st.sidebar.caption(
-    f"KMU Schema: {active_schema_version} · "
+    f"Kampagnen Schema: {active_schema_version} · "
     f"Pipeline: {getattr(pipeline_module, 'PIPELINE_SCHEMA_VERSION', 'älter')}"
 )
 st.sidebar.caption("Google Sheets Tabs: Leads · Stellen · CRM_Ausschluss · Scan_Log")
@@ -1026,6 +1035,7 @@ frame = migrate_frame(raw_frame)
 jobs_frame = migrate_jobs_frame(st.session_state["xing_jobs_cache"].copy())
 frame, schema_changed = ensure_kmu_schema(frame)
 frame, subject_changed = ensure_exclusive_subjects(frame)
+frame, quality_changed = refresh_quality(frame)
 exclusions = set(st.session_state["xing_exclusions_cache"])
 logs = st.session_state["xing_logs_cache"].copy()
 
@@ -1035,7 +1045,7 @@ if not frame.empty:
     if legacy_changed:
         frame.loc[legacy_mask, "first_seen_scan"] = "legacy"
         frame.loc[legacy_mask & frame["scan_id"].astype(str).str.strip().eq(""), "scan_id"] = "legacy"
-    if schema_changed or legacy_changed or subject_changed:
+    if schema_changed or legacy_changed or subject_changed or quality_changed:
         persist_full(frame)
 
 # Einmalige Migration für bestehende Firmen: So ist der Google Sheets Tab Stellen
@@ -1059,8 +1069,8 @@ if page == "Daily Leads":
     research_pending = len(research_candidate_indices(frame, max(1, len(frame)))) if not frame.empty else 0
     ai_pending = len(ai_candidate_indices(frame, max(1, len(frame)))) if not frame.empty else 0
     ready_mask = (
-        ((frame["email"] != "") | (frame["telefon"] != ""))
-        & (frame["call_opener"] != "")
+        (frame["quality_status"] == "Versandbereit")
+        & (frame["email"] != "")
         & (frame["erstmail"] != "")
     ) if not frame.empty else pd.Series(dtype=bool)
 
@@ -1082,13 +1092,13 @@ if page == "Daily Leads":
             "Zielkunden Kampagne",
             list(CAMPAIGN_PRESETS.keys()),
             index=0,
-            key="campaign_v51",
+            key="campaign_v60",
             help="Der Scanner filtert nicht nur nach Beruf, sondern auch nach kleiner Unternehmensstruktur.",
         )
         terms_text = st.text_area(
             "Suchbegriffe, eine Zeile je Begriff",
             "\n".join(CAMPAIGN_PRESETS[campaign]),
-            key=f"terms_v51_{campaign}",
+            key=f"terms_v60_{campaign}",
         )
         regions_text = st.text_area(
             "Regionen im Format Ort,Umkreis",
@@ -1099,7 +1109,7 @@ if page == "Daily Leads":
         source_columns = st.columns(4)
         use_adzuna = source_columns[0].checkbox("Adzuna", value=bool(adzuna_app_id and adzuna_api_key), key="source_adzuna_v4")
         use_ba = source_columns[1].checkbox("Bundesagentur", value=True, key="source_ba_v4")
-        use_google = source_columns[2].checkbox("Google Jobs", value=False, key="source_google_v4")
+        use_google = source_columns[2].checkbox("Google Jobs", value=bool(serpapi_key), key="source_google_v60")
         use_careers = source_columns[3].checkbox("Karriereseiten", value=False, key="source_careers_v4")
 
         career_urls_text = st.text_area(
@@ -1116,7 +1126,7 @@ if page == "Daily Leads":
         settings_columns = st.columns(3)
         days = settings_columns[0].number_input("Veröffentlicht seit Tagen", 1, 30, 14, key="days_v4")
         max_pages = settings_columns[1].number_input("Seiten je Suche", 1, 3, 1, key="pages_v4")
-        term_batch_size = settings_columns[2].number_input("Suchbegriffe pro Klick", 1, 30, 12, key="term_batch_v51")
+        term_batch_size = settings_columns[2].number_input("Suchbegriffe pro Klick", 1, 20, 8, key="term_batch_v60")
 
         all_terms = [line.strip() for line in terms_text.splitlines() if line.strip()]
         upcoming_terms = next_term_batch(all_terms, int(term_batch_size), logs)
@@ -1178,7 +1188,7 @@ if page == "Daily Leads":
                 stage="Suche",
                 status="gestartet",
                 processed_terms=" | ".join(terms_to_run),
-                message=f"KMU Suchrunde {campaign} gestartet. Ergebnisse werden nach jedem Begriff gespeichert.",
+                message=f"Suchrunde {campaign} gestartet. Ergebnisse werden nach jedem Begriff gespeichert.",
             )
 
             progress = st.progress(0, text="Suchrunde startet.")
@@ -1419,7 +1429,7 @@ if page == "Daily Leads":
 
         view_mode = st.radio(
             "Ansicht",
-            ["Kleine Direktkunden", "Verkaufsbereit", "Neu gefunden", "Alle offenen Leads"],
+            ["Neu gefunden", "Verkaufsbereit", "Alle offenen Leads", "Kleine Direktkunden"],
             horizontal=True,
         )
         if view_mode == "Kleine Direktkunden":
@@ -1430,8 +1440,8 @@ if page == "Daily Leads":
             ].copy()
         elif view_mode == "Verkaufsbereit":
             display_frame = frame[
-                ((frame["email"] != "") | (frame["telefon"] != ""))
-                & (frame["call_opener"] != "")
+                (frame["quality_status"] == "Versandbereit")
+                & (frame["email"] != "")
                 & (frame["erstmail"] != "")
                 & (~frame["status"].isin(["In Salesforce übernommen", "Ausschließen"]))
                 & (frame["crm_status"] != "Bereits in Salesforce")
@@ -1454,25 +1464,31 @@ if page == "Daily Leads":
 
         for index, row in display_frame.iterrows():
             with st.container(border=True):
-                header_columns = st.columns([5, 2, 2])
+                header_columns = st.columns([5, 1.5, 1.5, 2])
                 header_columns[0].subheader(row["firma"])
                 header_columns[1].metric(row["hot_status"] or "COLD", int(float(row["lead_score"] or 0)))
-                header_columns[2].write(row["pipeline_stage"] or "Gefunden")
+                header_columns[2].metric("Qualität", int(float(row["quality_score"] or 0)))
+                header_columns[3].write(row["quality_status"] or "Nicht freigeben")
 
-                st.write(f"**Segment:** {row['lead_segment'] or 'Kleiner Direktkunde'} · **Größenfit:** {row['size_fit'] or 'offen'}")
+                st.write(f"**Segment:** {row['lead_segment'] or 'Direktkunde'} · **Größenfit:** {row['size_fit'] or 'offen'}")
                 st.write(f"**Stellenschwerpunkte:** {row['offene_stellen']}")
                 st.write(f"**Warum interessant:** {row['warum_hot'] or 'noch keine belastbare Begründung'}")
+                if row["personalization_evidence"]:
+                    st.write(f"**Belegte Personalisierung:** {row['personalization_evidence']}")
+                if row["quality_notes"]:
+                    st.caption(f"Qualitätsprüfung: {row['quality_notes']}")
                 if row["size_reason"]:
-                    st.caption(f"KMU Bewertung: {row['size_reason']}")
+                    st.caption(f"Direktkunden Bewertung: {row['size_reason']}")
                 if row["benefits"]:
                     st.write(f"**Benefits:** {row['benefits']}")
                 st.caption(f"Quellen: {row['source_list'] or 'offen'} · bisher {row['times_seen'] or '1'} Mal gefunden")
 
-                contact_columns = st.columns(3)
+                contact_columns = st.columns(4)
                 contact_columns[0].write(f"**Ansprechpartner:** {row['ansprechpartner'] or 'nicht sicher gefunden'}")
                 contact_columns[1].write(f"**E Mail:** {row['email'] or 'nicht gefunden'}")
-                contact_columns[2].write(f"**Telefon:** {row['telefon'] or 'nicht gefunden'}")
-                st.caption(f"Recherche: {row['research_status'] or 'offen'} · Texte: {row['ai_status'] or 'offen'}")
+                contact_columns[2].write(f"**E Mail Qualität:** {row['email_quality'] or 'Fehlt'}")
+                contact_columns[3].write(f"**Telefon:** {row['telefon'] or 'nicht gefunden'}")
+                st.caption(f"Recherche: {row['research_status'] or 'offen'} · Texte: {row['ai_status'] or 'offen'} · Variante: {row['mail_variant'] or 'offen'}")
                 if row["last_error"]:
                     st.warning(row["last_error"])
 
@@ -1488,18 +1504,77 @@ if page == "Daily Leads":
                 if row["stellenlink"]:
                     link_columns[4].link_button("Stelle", row["stellenlink"])
 
-                tabs = st.tabs(["Call", "Erstmail", "Follow ups", "Bearbeiten"])
+                tabs = st.tabs(["Call", "Erstmail", "Follow ups", "Feedback", "Bearbeiten"])
                 with tabs[0]:
                     call_value = st.text_area("Call Opener", row["call_opener"], height=120, key=f"call_{row['lead_id']}")
                     discovery_value = st.text_area("Discovery Fragen", row["discovery_fragen"], height=230, key=f"disc_{row['lead_id']}")
                     challenger_value = st.text_area("Challenger Reframe", row["challenger_reframe"], height=130, key=f"challenger_{row['lead_id']}")
                 with tabs[1]:
                     subject_value = st.text_input("Betreff", row["erstmail_betreff"], key=f"subject_{row['lead_id']}")
-                    mail_value = st.text_area("Mail", row["erstmail"], height=300, key=f"mail_{row['lead_id']}")
+                    mail_value = st.text_area("Mail", row["erstmail"], height=330, key=f"mail_{row['lead_id']}")
                 with tabs[2]:
                     follow1_value = st.text_area("Follow up 1", row["follow_up_1"], height=220, key=f"follow1_{row['lead_id']}")
                     follow2_value = st.text_area("Follow up 2", row["follow_up_2"], height=220, key=f"follow2_{row['lead_id']}")
                 with tabs[3]:
+                    feedback_columns = st.columns(2)
+                    sent_value = feedback_columns[0].text_input(
+                        "Versendet am",
+                        row["versendet_am"],
+                        placeholder="2026 07 24",
+                        key=f"sent_{row['lead_id']}",
+                    )
+                    response_options = ["", "Keine Antwort", "Positive Antwort", "Rückfrage", "Absage", "Termin vereinbart"]
+                    current_response = row["antwort_status"] if row["antwort_status"] in response_options else ""
+                    response_value = feedback_columns[1].selectbox(
+                        "Antwortstatus",
+                        response_options,
+                        index=response_options.index(current_response),
+                        key=f"response_{row['lead_id']}",
+                    )
+                    response_date_value = feedback_columns[0].text_input(
+                        "Antwort am",
+                        row["antwort_am"],
+                        placeholder="2026 07 25",
+                        key=f"response_date_{row['lead_id']}",
+                    )
+                    appointment_value = feedback_columns[1].text_input(
+                        "Termin am",
+                        row["termin_am"],
+                        placeholder="2026 07 29 10:30",
+                        key=f"appointment_{row['lead_id']}",
+                    )
+                    rejection_value = st.text_input(
+                        "Absagegrund",
+                        row["absagegrund"],
+                        key=f"rejection_{row['lead_id']}",
+                    )
+                    response_note_value = st.text_area(
+                        "Antwortnotiz",
+                        row["antwort_notiz"],
+                        key=f"response_note_{row['lead_id']}",
+                    )
+                    quick_columns = st.columns(2)
+                    if quick_columns[0].button("Heute als versendet markieren", key=f"mark_sent_{row['lead_id']}"):
+                        frame.loc[index, "versendet_am"] = date.today().isoformat()
+                        frame.loc[index, "status"] = "Versendet"
+                        persist_rows(frame.loc[[index]], frame)
+                        st.success("Versand gespeichert.")
+                    if quick_columns[1].button("Feedback speichern", key=f"save_feedback_{row['lead_id']}"):
+                        frame.loc[index, "versendet_am"] = sent_value
+                        frame.loc[index, "antwort_status"] = response_value
+                        frame.loc[index, "antwort_am"] = response_date_value
+                        frame.loc[index, "termin_am"] = appointment_value
+                        frame.loc[index, "absagegrund"] = rejection_value
+                        frame.loc[index, "antwort_notiz"] = response_note_value
+                        if response_value == "Termin vereinbart":
+                            frame.loc[index, "status"] = "Termin vereinbart"
+                        elif response_value in {"Positive Antwort", "Rückfrage", "Absage"}:
+                            frame.loc[index, "status"] = "Antwort erhalten"
+                        elif sent_value and frame.loc[index, "status"] == "Neu":
+                            frame.loc[index, "status"] = "Versendet"
+                        persist_rows(frame.loc[[index]], frame)
+                        st.success("Feedback gespeichert.")
+                with tabs[4]:
                     status_value = st.selectbox(
                         "Status",
                         STATUSES,
@@ -1527,6 +1602,10 @@ if page == "Daily Leads":
                         frame.loc[index, "wiedervorlage"] = due_value.isoformat()
                         frame.loc[index, "notiz"] = note_value
                         frame.loc[index, "text_locked"] = "ja" if lock_value else ""
+                        quality_score, quality_status, quality_notes = evaluate_lead_quality(frame.loc[index].to_dict())
+                        frame.loc[index, "quality_score"] = str(quality_score)
+                        frame.loc[index, "quality_status"] = quality_status
+                        frame.loc[index, "quality_notes"] = quality_notes
                         try:
                             persist_rows(frame.loc[[index]], frame)
                             if status_value in {"Ausschließen", "In Salesforce übernommen"}:
@@ -1598,7 +1677,7 @@ elif page == "Stellen":
             hide_index=True,
             column_config={
                 "stellenlink": st.column_config.LinkColumn("Stellenanzeige"),
-                "small_business_score": st.column_config.NumberColumn("KMU Score", format="%d"),
+                "small_business_score": st.column_config.NumberColumn("Direktkunden Score", format="%d"),
                 "lead_score": st.column_config.NumberColumn("Sales Score", format="%d"),
             },
         )
@@ -1610,6 +1689,79 @@ elif page == "Stellen":
             file_name=f"xing_stellen_{date.today().isoformat()}.csv",
             mime="text/csv",
         )
+
+elif page == "Kampagnen Feedback":
+    st.title("Kampagnen Feedback")
+    st.caption("Die Auswertung basiert ausschließlich auf von dir gespeicherten Versand und Antwortdaten.")
+    sent = frame[frame["versendet_am"].astype(str).str.strip() != ""].copy()
+    answered = sent[
+        sent["antwort_status"].isin(["Positive Antwort", "Rückfrage", "Absage", "Termin vereinbart"])
+    ].copy()
+    positive = sent[sent["antwort_status"].isin(["Positive Antwort", "Termin vereinbart"])].copy()
+    appointments = sent[sent["antwort_status"] == "Termin vereinbart"].copy()
+
+    response_rate = (len(answered) / len(sent) * 100) if len(sent) else 0
+    positive_rate = (len(positive) / len(sent) * 100) if len(sent) else 0
+    appointment_rate = (len(appointments) / len(sent) * 100) if len(sent) else 0
+
+    metrics = st.columns(6)
+    metrics[0].metric("Versendet", len(sent))
+    metrics[1].metric("Antworten", len(answered))
+    metrics[2].metric("Antwortquote", f"{response_rate:.1f} %")
+    metrics[3].metric("Positive Antworten", len(positive))
+    metrics[4].metric("Termine", len(appointments))
+    metrics[5].metric("Terminquote", f"{appointment_rate:.1f} %")
+
+    if sent.empty:
+        st.info("Noch keine Versanddaten gespeichert. Markiere Leads im Feedback Tab als versendet.")
+    else:
+        st.subheader("Leistung nach Segment")
+        segment_rows = []
+        for segment, group in sent.groupby(sent["lead_segment"].replace("", "Direktkunde")):
+            group_answered = group[group["antwort_status"].isin(["Positive Antwort", "Rückfrage", "Absage", "Termin vereinbart"])]
+            group_positive = group[group["antwort_status"].isin(["Positive Antwort", "Termin vereinbart"])]
+            group_appointments = group[group["antwort_status"] == "Termin vereinbart"]
+            segment_rows.append({
+                "Segment": segment,
+                "Versendet": len(group),
+                "Antworten": len(group_answered),
+                "Antwortquote": round(len(group_answered) / len(group) * 100, 1),
+                "Positive Antworten": len(group_positive),
+                "Termine": len(group_appointments),
+                "Terminquote": round(len(group_appointments) / len(group) * 100, 1),
+            })
+        segment_table = pd.DataFrame(segment_rows).sort_values(
+            ["Termine", "Positive Antworten", "Antwortquote"], ascending=[False, False, False]
+        )
+        st.dataframe(segment_table, use_container_width=True, hide_index=True)
+
+        st.subheader("Leistung nach Mailvariante")
+        variant_rows = []
+        for variant, group in sent.groupby(sent["mail_variant"].replace("", "Ohne Kennzeichnung")):
+            group_answered = group[group["antwort_status"].isin(["Positive Antwort", "Rückfrage", "Absage", "Termin vereinbart"])]
+            group_appointments = group[group["antwort_status"] == "Termin vereinbart"]
+            variant_rows.append({
+                "Mailvariante": variant,
+                "Versendet": len(group),
+                "Antworten": len(group_answered),
+                "Antwortquote": round(len(group_answered) / len(group) * 100, 1),
+                "Termine": len(group_appointments),
+                "Terminquote": round(len(group_appointments) / len(group) * 100, 1),
+            })
+        variant_table = pd.DataFrame(variant_rows).sort_values(
+            ["Termine", "Antwortquote"], ascending=[False, False]
+        )
+        st.dataframe(variant_table, use_container_width=True, hide_index=True)
+
+        st.subheader("Letzte Rückmeldungen")
+        feedback_table = sent[
+            [
+                "firma", "lead_segment", "mail_variant", "versendet_am", "antwort_status",
+                "antwort_am", "termin_am", "absagegrund", "antwort_notiz",
+            ]
+        ].copy()
+        feedback_table = feedback_table.sort_values(["antwort_am", "versendet_am"], ascending=False)
+        st.dataframe(feedback_table.head(200), use_container_width=True, hide_index=True)
 
 elif page == "Follow ups":
     st.title("Follow ups")
@@ -1648,12 +1800,14 @@ elif page == "Alle Leads":
         ).any(axis=1)
         filtered = filtered[mask]
     table = filtered[[
-        "hot_status", "lead_score", "small_business_score", "firma", "lead_segment", "size_fit",
-        "pipeline_stage", "crm_status", "anzahl_stellen", "offene_stellen", "orte", "ansprechpartner", "rolle",
-        "email", "telefon", "website", "research_status", "ai_status", "status",
-        "wiedervorlage", "first_seen", "zuletzt_gefunden", "times_seen",
+        "hot_status", "lead_score", "quality_score", "quality_status", "small_business_score",
+        "firma", "lead_segment", "size_fit", "pipeline_stage", "crm_status", "anzahl_stellen",
+        "offene_stellen", "orte", "ansprechpartner", "rolle", "email", "email_quality", "telefon",
+        "website", "research_status", "ai_status", "mail_variant", "status", "wiedervorlage",
+        "versendet_am", "antwort_status", "antwort_am", "termin_am", "first_seen", "zuletzt_gefunden", "times_seen",
     ]].copy()
     table["lead_score"] = pd.to_numeric(table["lead_score"], errors="coerce").fillna(0).astype(int)
+    table["quality_score"] = pd.to_numeric(table["quality_score"], errors="coerce").fillna(0).astype(int)
     table["small_business_score"] = pd.to_numeric(table["small_business_score"], errors="coerce").fillna(0).astype(int)
     st.dataframe(
         table,
@@ -1662,7 +1816,8 @@ elif page == "Alle Leads":
         column_config={
             "website": st.column_config.LinkColumn("Website"),
             "lead_score": st.column_config.NumberColumn("Sales Score", format="%d"),
-            "small_business_score": st.column_config.NumberColumn("KMU Score", format="%d"),
+            "quality_score": st.column_config.NumberColumn("Qualität", format="%d"),
+            "small_business_score": st.column_config.NumberColumn("Direktkunden Score", format="%d"),
         },
     )
     export_csv = filtered.reindex(columns=COLUMNS).to_csv(index=False).encode("utf-8-sig")
