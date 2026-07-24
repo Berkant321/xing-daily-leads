@@ -51,12 +51,35 @@ st.set_page_config(
 
 CAMPAIGN_PRESETS = {
     "Alle kleinen Direktkunden": [
-        "Physiotherapeut", "Ergotherapeut", "Logopäde",
-        "Steuerfachangestellte", "Steuerfachwirt", "Bilanzbuchhalter",
-        "Pflegefachkraft ambulant", "Medizinische Fachangestellte",
-        "Elektroniker", "Mechatroniker", "Anlagenmechaniker SHK",
-        "Servicetechniker", "Bauleiter", "Projektingenieur", "Konstrukteur",
-        "Softwareentwickler", "Systemadministrator",
+        # Bewusst gemischt sortiert, damit schon das erste Paket mehrere Branchen liefert.
+        "Physiotherapeut", "Steuerfachangestellte", "Elektroniker", "Softwareentwickler",
+        "Pflegefachkraft", "Vertriebsmitarbeiter", "Bauleiter", "Medizinische Fachangestellte",
+        "Mechatroniker", "Bilanzbuchhalter", "Systemadministrator", "Berufskraftfahrer",
+        "Ergotherapeut", "Rechtsanwaltsfachangestellte", "Servicetechniker", "Sales Manager",
+        "Logopäde", "Lohnbuchhalter", "Industriemechaniker", "Disponent",
+        "Zahnmedizinische Fachangestellte", "Konstrukteur", "Projektleiter", "Account Manager",
+        "Pflegedienstleitung", "Finanzbuchhalter", "Anlagenmechaniker SHK", "IT Support",
+        "Schweißer", "Personalreferent", "Recruiter", "Sachbearbeiter",
+        "Controller", "Einkäufer", "Assistenz der Geschäftsführung", "Bürokaufmann",
+        "Kaufmann für Büromanagement", "Industriekaufmann", "Speditionskaufmann", "Lagerist",
+        "Fachkraft für Lagerlogistik", "Logistikmitarbeiter", "Produktionsmitarbeiter", "Maschinenbediener",
+        "CNC Fräser", "CNC Dreher", "Werkzeugmechaniker", "Zerspanungsmechaniker",
+        "Metallbauer", "Tischler", "Kältetechniker", "Elektroniker Betriebstechnik",
+        "Elektroniker Automatisierungstechnik", "Elektroingenieur", "Projektingenieur", "TGA Planer",
+        "Versorgungsingenieur", "Architekt", "Kalkulator Hochbau", "Polier",
+        "Vorarbeiter", "Monteur", "Instandhalter", "Qualitätsmanager",
+        "Qualitätssicherung", "Laborant", "Chemielaborant", "Pharmakant",
+        "Regulatory Affairs Manager", "Clinical Research Associate", "Apotheker", "PTA",
+        "Steuerfachwirt", "Steuerberater", "Wirtschaftsprüfer", "Rechtsanwalt",
+        "Rechtsanwaltsanwärter", "Notarfachangestellte", "Patentanwaltsfachangestellte", "Compliance Manager",
+        "Data Analyst", "DevOps Engineer", "IT Administrator", "IT Projektleiter",
+        "SAP Berater", "ERP Consultant", "Webentwickler", "Fachinformatiker",
+        "Marketing Manager", "Online Marketing Manager", "Customer Service", "Kundenberater",
+        "Außendienstmitarbeiter", "Key Account Manager", "Business Development Manager", "Niederlassungsleiter",
+        "Praxismanager", "Praxisleitung", "Therapeutische Leitung", "Heilerziehungspfleger",
+        "Sozialpädagoge", "Erzieher", "Pädagogische Fachkraft", "Psychologe",
+        "Koch", "Restaurantfachkraft", "Hotelfachkraft", "Hausmeister",
+        "Gebäudereiniger", "Gärtner", "Immobilienkaufmann", "Property Manager",
     ],
     "Therapiepraxen": [
         "Physiotherapeut", "Ergotherapeut", "Logopäde", "Sprachtherapeut",
@@ -65,6 +88,10 @@ CAMPAIGN_PRESETS = {
     "Steuerkanzleien": [
         "Steuerfachangestellte", "Steuerfachwirt", "Bilanzbuchhalter",
         "Lohnbuchhalter", "Finanzbuchhalter", "Steuerberater",
+    ],
+    "Rechtskanzleien": [
+        "Rechtsanwaltsfachangestellte", "Rechtsanwalt", "Rechtsanwaltsanwärter",
+        "Notarfachangestellte", "Patentanwaltsfachangestellte", "Legal Counsel",
     ],
     "Ambulante Pflege": [
         "Pflegefachkraft ambulant", "Pflegedienstleitung ambulant",
@@ -79,15 +106,32 @@ CAMPAIGN_PRESETS = {
         "Servicetechniker", "Industriemechaniker", "Schweißer",
         "Tischler", "Metallbauer", "Kältetechniker",
     ],
+    "Industrie und Produktion": [
+        "Produktionsmitarbeiter", "Maschinenbediener", "CNC Fräser", "CNC Dreher",
+        "Zerspanungsmechaniker", "Werkzeugmechaniker", "Instandhalter", "Qualitätssicherung",
+    ],
     "Kleine Ingenieurbüros": [
         "Bauleiter", "Projektingenieur", "Konstrukteur", "TGA Planer",
         "Elektroingenieur", "Versorgungsingenieur", "Projektleiter Bau",
     ],
     "Kleine IT Unternehmen": [
         "Softwareentwickler", "Systemadministrator", "DevOps Engineer",
-        "IT Support", "IT Administrator",
+        "IT Support", "IT Administrator", "Fachinformatiker", "SAP Berater",
+    ],
+    "Logistik und Transport": [
+        "Berufskraftfahrer", "Disponent", "Speditionskaufmann", "Lagerist",
+        "Fachkraft für Lagerlogistik", "Logistikmitarbeiter", "Fuhrparkleiter",
+    ],
+    "Vertrieb und Kaufmännisch": [
+        "Vertriebsmitarbeiter", "Sales Manager", "Account Manager", "Key Account Manager",
+        "Außendienstmitarbeiter", "Business Development Manager", "Sachbearbeiter", "Einkäufer",
+    ],
+    "Pharma und Labor": [
+        "Laborant", "Chemielaborant", "Pharmakant", "Regulatory Affairs Manager",
+        "Clinical Research Associate", "Apotheker", "PTA",
     ],
 }
+
 
 DEFAULT_REGIONS = [
     ("Münster", 120),
@@ -125,7 +169,27 @@ def _google_config_signature() -> str:
         client_email,
     ])
 
-KMU_SCHEMA_VERSION = "5.0.2"
+KMU_SCHEMA_VERSION = "5.1.0"
+
+
+def exclusive_invitation_subject(company: Any) -> str:
+    company_text = clean_text(company)
+    return f"Exklusive Einladung | {company_text}" if company_text else "Exklusive Einladung"
+
+
+def ensure_exclusive_subjects(frame: pd.DataFrame | None) -> tuple[pd.DataFrame, bool]:
+    result = frame.copy() if frame is not None else pd.DataFrame()
+    if result.empty or "firma" not in result.columns:
+        return result, False
+    if "erstmail_betreff" not in result.columns:
+        result["erstmail_betreff"] = ""
+    changed = False
+    for index, company in result["firma"].items():
+        target = exclusive_invitation_subject(company)
+        if target and clean_text(result.at[index, "erstmail_betreff"]) != target:
+            result.at[index, "erstmail_betreff"] = target
+            changed = True
+    return result, changed
 KMU_REQUIRED_COLUMNS = {
     "lead_segment": "Kleiner Direktkunde",
     "size_fit": "Mittel",
@@ -961,6 +1025,7 @@ raw_frame = st.session_state["xing_frame_cache"].copy()
 frame = migrate_frame(raw_frame)
 jobs_frame = migrate_jobs_frame(st.session_state["xing_jobs_cache"].copy())
 frame, schema_changed = ensure_kmu_schema(frame)
+frame, subject_changed = ensure_exclusive_subjects(frame)
 exclusions = set(st.session_state["xing_exclusions_cache"])
 logs = st.session_state["xing_logs_cache"].copy()
 
@@ -970,7 +1035,7 @@ if not frame.empty:
     if legacy_changed:
         frame.loc[legacy_mask, "first_seen_scan"] = "legacy"
         frame.loc[legacy_mask & frame["scan_id"].astype(str).str.strip().eq(""), "scan_id"] = "legacy"
-    if schema_changed or legacy_changed:
+    if schema_changed or legacy_changed or subject_changed:
         persist_full(frame)
 
 # Einmalige Migration für bestehende Firmen: So ist der Google Sheets Tab Stellen
@@ -989,7 +1054,7 @@ if jobs_frame.empty and not frame.empty:
 
 if page == "Daily Leads":
     st.title("Daily Leads")
-    st.caption("KMU Fokus: kleine Praxen, Kanzleien, Pflegedienste, Handwerksbetriebe und Ingenieurbüros werden vor großen Arbeitgebern priorisiert.")
+    st.caption("Breite Massenkampagne über alle relevanten Berufsgruppen. Kleine und mittelständische Direktkunden werden weiterhin priorisiert.")
 
     research_pending = len(research_candidate_indices(frame, max(1, len(frame)))) if not frame.empty else 0
     ai_pending = len(ai_candidate_indices(frame, max(1, len(frame)))) if not frame.empty else 0
@@ -1017,13 +1082,13 @@ if page == "Daily Leads":
             "Zielkunden Kampagne",
             list(CAMPAIGN_PRESETS.keys()),
             index=0,
-            key="campaign_v44",
+            key="campaign_v51",
             help="Der Scanner filtert nicht nur nach Beruf, sondern auch nach kleiner Unternehmensstruktur.",
         )
         terms_text = st.text_area(
             "Suchbegriffe, eine Zeile je Begriff",
             "\n".join(CAMPAIGN_PRESETS[campaign]),
-            key=f"terms_v44_{campaign}",
+            key=f"terms_v51_{campaign}",
         )
         regions_text = st.text_area(
             "Regionen im Format Ort,Umkreis",
@@ -1051,7 +1116,7 @@ if page == "Daily Leads":
         settings_columns = st.columns(3)
         days = settings_columns[0].number_input("Veröffentlicht seit Tagen", 1, 30, 14, key="days_v4")
         max_pages = settings_columns[1].number_input("Seiten je Suche", 1, 3, 1, key="pages_v4")
-        term_batch_size = settings_columns[2].number_input("Suchbegriffe pro Klick", 1, 5, 2, key="term_batch_v4")
+        term_batch_size = settings_columns[2].number_input("Suchbegriffe pro Klick", 1, 30, 12, key="term_batch_v51")
 
         all_terms = [line.strip() for line in terms_text.splitlines() if line.strip()]
         upcoming_terms = next_term_batch(all_terms, int(term_batch_size), logs)
@@ -1310,6 +1375,7 @@ if page == "Daily Leads":
                     api_key=openai_api_key,
                     model=openai_model,
                 )
+                updated["erstmail_betreff"] = exclusive_invitation_subject(company)
                 for column in COLUMNS:
                     frame.loc[index, column] = updated.get(column, frame.loc[index, column])
                 persist_rows(frame.loc[[index]], frame)
