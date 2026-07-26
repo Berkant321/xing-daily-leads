@@ -1058,13 +1058,51 @@ def latest_scan_id(frame: pd.DataFrame) -> str:
     return max(scan_ids) if scan_ids else ""
 
 
+def latest_completed_search(logs: pd.DataFrame | None) -> dict[str, str]:
+    """Liefert den letzten abgeschlossenen Suchlauf aus dem Scan Log.
+
+    Für die Ansicht ist nicht die zuletzt berührte Lead Zeile entscheidend, sondern
+    der letzte Suchlauf mit Status fertig oder fehler. So werden alte, nur erneut
+    gefundene Leads nicht fälschlich als neu angezeigt.
+    """
+    if logs is None or logs.empty:
+        return {}
+    work = logs.copy().fillna("")
+    if not {"stage", "status", "scan_id"}.issubset(work.columns):
+        return {}
+    work = work[(work["stage"] == "Suche") & (work["status"].isin(["fertig", "fehler"]))].copy()
+    if work.empty:
+        return {}
+    if "timestamp" in work.columns:
+        work = work.sort_values("timestamp")
+    row = work.iloc[-1]
+    return {column: clean_text(row.get(column, "")) for column in LOG_COLUMNS}
+
+
+def _candidate_indices_for_scope(
+    frame: pd.DataFrame,
+    selector,
+    limit: int,
+    latest_search_scan: str,
+    only_latest_new: bool,
+) -> list[int]:
+    """Priorisiert echte neue Leads des letzten Suchlaufs."""
+    if frame.empty:
+        return []
+    limit = max(1, int(limit))
+    if only_latest_new and latest_search_scan:
+        scoped = frame[frame["first_seen_scan"] == latest_search_scan].copy()
+        return selector(scoped, limit)
+    return selector(frame, limit)
+
+
 openai_api_key = str(st.secrets.get("openai_api_key", "")).strip()
 openai_model = str(st.secrets.get("openai_model", "gpt-5-mini")).strip() or "gpt-5-mini"
 serpapi_key = str(st.secrets.get("serpapi_key", "")).strip()
 adzuna_app_id = str(st.secrets.get("adzuna_app_id", "")).strip()
 adzuna_api_key = str(st.secrets.get("adzuna_api_key", "")).strip()
 
-st.sidebar.title("XING Daily Leads V9")
+st.sidebar.title("XING Daily Leads V10")
 page = st.sidebar.radio(
     "Bereich",
     ["Daily Leads", "Stellen", "Kampagnen Feedback", "Follow ups", "Alle Leads", "Salesforce Abgleich", "CRM Ausschluss"],
@@ -1471,12 +1509,59 @@ if page == "Daily Leads":
                 st.error("Keine Suchaufgabe konnte abgeschlossen werden. Öffne die technischen Details für die Fehlerursachen.")
             progress.empty()
 
-    research_all = research_candidate_indices(frame, max(1, len(frame))) if not frame.empty else []
-    with st.expander(f"Schritt 2: Website, Ansprechpartner, Mail und Telefon recherchieren ({len(research_all)} offen)"):
-        st.write("Dieser Schritt bearbeitet nur bereits gespeicherte Firmen in kleinen Paketen.")
-        research_limit = st.number_input("Firmen pro Recherchepaket", 1, 100, 20, key="research_limit_v7")
-        if st.button("Schritt 2 starten", disabled=not research_all, key="start_research_v4"):
-            indices = research_candidate_indices(frame, int(research_limit))
+    live_logs = st.session_state.get("xing_logs_cache", logs).copy()
+    latest_search = latest_completed_search(live_logs)
+    latest_search_scan = clean_text(latest_search.get("scan_id", "")) or latest_scan_id(frame)
+    latest_new_mask = (frame["first_seen_scan"] == latest_search_scan) if (not frame.empty and latest_search_scan) else pd.Series(False, index=frame.index)
+    latest_updated_mask = (
+        (frame["scan_id"] == latest_search_scan)
+        & (frame["first_seen_scan"] != latest_search_scan)
+    ) if (not frame.empty and latest_search_scan) else pd.Series(False, index=frame.index)
+
+    latest_new_count = int(latest_new_mask.sum()) if not frame.empty else 0
+    latest_updated_count = int(latest_updated_mask.sum()) if not frame.empty else 0
+    latest_found_jobs = safe_int(latest_search.get("found_jobs", "0")) if latest_search else 0
+
+    if latest_search_scan:
+        summary_cols = st.columns(3)
+        summary_cols[0].metric("Neu im letzten Lauf", latest_new_count)
+        summary_cols[1].metric("Bekannte aktualisiert", latest_updated_count)
+        summary_cols[2].metric("Gefundene Stellen", latest_found_jobs)
+
+    current_scan_text = " ".join(
+        frame.loc[latest_new_mask | latest_updated_mask, ["research_notes", "last_error"]]
+        .fillna("")
+        .astype(str)
+        .values
+        .ravel()
+        .tolist()
+    ) if (not frame.empty and latest_search_scan) else ""
+    if "429" in current_scan_text or "quota" in current_scan_text.lower():
+        st.warning(
+            "Die Suche hat neue Firmen geliefert, aber mindestens ein externer Dienst meldet aktuell Limit 429. "
+            "Dadurch fehlen bei einem Teil der Leads Ansprechpartner, E Mail oder echte KI Texte. "
+            "Diese Leads bleiben sichtbar, werden aber nicht als versandbereit dargestellt."
+        )
+
+    research_all_global = research_candidate_indices(frame, max(1, len(frame))) if not frame.empty else []
+    research_all_latest = research_candidate_indices(frame.loc[latest_new_mask].copy(), max(1, latest_new_count)) if latest_new_count else []
+    with st.expander(
+        f"Schritt 2: Website, Ansprechpartner, Mail und Telefon recherchieren "
+        f"({len(research_all_latest)} neue aus letztem Lauf, {len(research_all_global)} insgesamt offen)"
+    ):
+        st.write("Standardmäßig werden zuerst ausschließlich die wirklich neuen Firmen des letzten Suchlaufs bearbeitet.")
+        research_only_latest = st.checkbox(
+            "Nur neue Firmen aus dem letzten Suchlauf",
+            value=True,
+            key="research_only_latest_v10",
+            disabled=not bool(latest_search_scan),
+        )
+        research_limit = st.number_input("Firmen pro Recherchepaket", 1, 100, 20, key="research_limit_v10")
+        research_available = research_all_latest if research_only_latest else research_all_global
+        if st.button("Schritt 2 starten", disabled=not research_available, key="start_research_v10"):
+            indices = _candidate_indices_for_scope(
+                frame, research_candidate_indices, int(research_limit), latest_search_scan, research_only_latest
+            )
             run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             append_log(
                 scan_id=run_id,
@@ -1515,12 +1600,25 @@ if page == "Daily Leads":
             st.session_state["last_pipeline_details"] = details
             st.success(f"Recherche abgeschlossen: {len(indices)} Firmen, {websites} Websites, {contacts} direkte Kontakte.")
 
-    ai_all = ai_candidate_indices(frame, max(1, len(frame))) if not frame.empty else []
-    with st.expander(f"Schritt 3: Individuelle Sales Texte erzeugen ({len(ai_all)} offen)"):
-        st.write("OpenAI wird erst jetzt für die bereits gespeicherten und möglichst recherchierten Firmen genutzt.")
-        ai_limit = st.number_input("Firmen pro Textpaket", 1, 30, 10, key="ai_limit_v4")
-        if st.button("Schritt 3 starten", disabled=not ai_all, key="start_ai_v4"):
-            indices = ai_candidate_indices(frame, int(ai_limit))
+    ai_all_global = ai_candidate_indices(frame, max(1, len(frame))) if not frame.empty else []
+    ai_all_latest = ai_candidate_indices(frame.loc[latest_new_mask].copy(), max(1, latest_new_count)) if latest_new_count else []
+    with st.expander(
+        f"Schritt 3: Individuelle Sales Texte erzeugen "
+        f"({len(ai_all_latest)} neue aus letztem Lauf, {len(ai_all_global)} insgesamt offen)"
+    ):
+        st.write("Auch hier werden standardmäßig nur die wirklich neuen Firmen des letzten Suchlaufs verarbeitet.")
+        ai_only_latest = st.checkbox(
+            "Nur neue Firmen aus dem letzten Suchlauf",
+            value=True,
+            key="ai_only_latest_v10",
+            disabled=not bool(latest_search_scan),
+        )
+        ai_limit = st.number_input("Firmen pro Textpaket", 1, 50, 10, key="ai_limit_v10")
+        ai_available = ai_all_latest if ai_only_latest else ai_all_global
+        if st.button("Schritt 3 starten", disabled=not ai_available, key="start_ai_v10"):
+            indices = _candidate_indices_for_scope(
+                frame, ai_candidate_indices, int(ai_limit), latest_search_scan, ai_only_latest
+            )
             run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             append_log(
                 scan_id=run_id,
@@ -1572,55 +1670,94 @@ if page == "Daily Leads":
     if frame.empty:
         st.info("Noch keine Leads vorhanden. Starte Schritt 1.")
     else:
-        latest_scan = latest_scan_id(frame)
-        latest_frame = frame[frame["scan_id"] == latest_scan].copy() if latest_scan else frame.copy()
-        latest_frame = latest_frame[
-            ~latest_frame["status"].isin(["In Salesforce übernommen", "Ausschließen"])
-            & (latest_frame["crm_status"] != "Bereits in Salesforce")
-            & (latest_frame["size_fit"] != "Groß oder unpassend")
-        ].copy()
-        latest_frame["score_num"] = pd.to_numeric(latest_frame["lead_score"], errors="coerce").fillna(0)
-        latest_frame = latest_frame.sort_values("score_num", ascending=False)
-
-        view_mode = st.radio(
-            "Ansicht",
-            ["Neu gefunden", "Verkaufsbereit", "Alle offenen Leads", "Kleine Direktkunden"],
-            horizontal=True,
+        base_open_mask = (
+            ~frame["status"].isin(["In Salesforce übernommen", "Ausschließen"])
+            & (frame["crm_status"] != "Bereits in Salesforce")
+            & (frame["size_fit"] != "Groß oder unpassend")
         )
-        if view_mode == "Kleine Direktkunden":
-            display_frame = frame[
-                (frame["size_fit"] == "Klein")
-                & (~frame["status"].isin(["In Salesforce übernommen", "Ausschließen"]))
-                & (frame["crm_status"] != "Bereits in Salesforce")
-            ].copy()
-        elif view_mode == "Verkaufsbereit":
-            display_frame = frame[
-                (frame["quality_status"] == "Versandbereit")
-                & (frame["email"] != "")
-                & (frame["erstmail"] != "")
-                & (~frame["status"].isin(["In Salesforce übernommen", "Ausschließen"]))
-                & (frame["crm_status"] != "Bereits in Salesforce")
-            ].copy()
-        elif view_mode == "Neu gefunden":
-            display_frame = latest_frame.copy()
+        true_new_frame = frame[base_open_mask & latest_new_mask].copy()
+        updated_last_run_frame = frame[base_open_mask & latest_updated_mask].copy()
+
+        ready_frame = frame[
+            base_open_mask
+            & (frame["quality_status"].isin(["Versandbereit", "Kurz prüfen"]))
+            & (frame["email"] != "")
+            & (frame["erstmail"] != "")
+        ].copy()
+        open_frame = frame[base_open_mask].copy()
+
+        view_options = [
+            f"Neu aus letztem Lauf ({len(true_new_frame)})",
+            f"Im letzten Lauf aktualisiert ({len(updated_last_run_frame)})",
+            f"Mit Kontakt und Mail ({len(ready_frame)})",
+            f"Alle offenen Leads ({len(open_frame)})",
+        ]
+        view_mode = st.radio("Arbeitsansicht", view_options, horizontal=True, key="lead_view_v10")
+
+        if view_mode.startswith("Neu aus"):
+            display_frame = true_new_frame.copy()
+        elif view_mode.startswith("Im letzten Lauf"):
+            display_frame = updated_last_run_frame.copy()
+        elif view_mode.startswith("Mit Kontakt"):
+            display_frame = ready_frame.copy()
         else:
-            display_frame = frame[
-                ~frame["status"].isin(["In Salesforce übernommen", "Ausschließen"])
-                & (frame["crm_status"] != "Bereits in Salesforce")
-            ].copy()
+            display_frame = open_frame.copy()
+
+        filter_cols = st.columns([2, 2, 3])
+        segments = ["Alle Segmente"] + sorted([x for x in display_frame["lead_segment"].dropna().astype(str).unique().tolist() if x])
+        selected_segment = filter_cols[0].selectbox("Segment", segments, key="segment_filter_v10")
+        contact_filter = filter_cols[1].selectbox(
+            "Kontaktstatus",
+            ["Alle", "E Mail vorhanden", "Direkte oder Recruiting Mail", "Recherche offen"],
+            key="contact_filter_v10",
+        )
+        search_text = filter_cols[2].text_input(
+            "Firma oder Position suchen",
+            placeholder="zum Beispiel Architekt, Ingenieur, Steuer oder IT",
+            key="lead_search_v10",
+        ).strip().lower()
+
+        if selected_segment != "Alle Segmente":
+            display_frame = display_frame[display_frame["lead_segment"] == selected_segment].copy()
+        if contact_filter == "E Mail vorhanden":
+            display_frame = display_frame[display_frame["email"] != ""].copy()
+        elif contact_filter == "Direkte oder Recruiting Mail":
+            display_frame = display_frame[display_frame["email_quality"].isin(["Direkt", "Recruiting"])].copy()
+        elif contact_filter == "Recherche offen":
+            display_frame = display_frame[display_frame["research_status"].isin(["", "offen", "nicht gefunden", "Fehler"])].copy()
+        if search_text:
+            haystack = (
+                display_frame["firma"].fillna("").astype(str) + " "
+                + display_frame["job_titles"].fillna("").astype(str) + " "
+                + display_frame["lead_segment"].fillna("").astype(str)
+            ).str.lower()
+            display_frame = display_frame[haystack.str.contains(re.escape(search_text), na=False)].copy()
+
         display_frame["score_num"] = pd.to_numeric(display_frame["lead_score"], errors="coerce").fillna(0)
         display_frame["small_num"] = pd.to_numeric(display_frame["small_business_score"], errors="coerce").fillna(0)
+        display_frame["quality_num"] = pd.to_numeric(display_frame["quality_score"], errors="coerce").fillna(0)
+        display_frame["contact_rank"] = display_frame["email_quality"].map(
+            {"Direkt": 4, "Recruiting": 3, "Allgemein": 2, "Fehlt": 0}
+        ).fillna(0)
+        display_frame["has_mail_text"] = ((display_frame["email"] != "") & (display_frame["erstmail"] != "")).astype(int)
         display_frame = display_frame.sort_values(
-            ["small_num", "score_num"], ascending=[False, False]
+            ["has_mail_text", "contact_rank", "quality_num", "small_num", "score_num", "firma"],
+            ascending=[False, False, False, False, False, True],
         ).head(250)
 
+        st.caption(
+            f"Angezeigt: {len(display_frame)}. Echte neue Leads werden über first_seen_scan erkannt. "
+            "Bereits bekannte Firmen, die im letzten Lauf erneut gefunden wurden, stehen separat."
+        )
         if display_frame.empty:
-            st.info("In dieser Ansicht gibt es aktuell keine Leads.")
+            st.info("In dieser Ansicht gibt es aktuell keine passenden Leads.")
 
         for index, row in display_frame.iterrows():
             with st.container(border=True):
                 header_columns = st.columns([5, 1.5, 1.5, 2])
-                header_columns[0].subheader(row["firma"])
+                is_true_new = bool(latest_search_scan and clean_text(row.get("first_seen_scan", "")) == latest_search_scan)
+                new_badge = "NEU · " if is_true_new else ""
+                header_columns[0].subheader(f"{new_badge}{row['firma']}")
                 header_columns[1].metric(row["hot_status"] or "COLD", int(float(row["lead_score"] or 0)))
                 header_columns[2].metric("Qualität", int(float(row["quality_score"] or 0)))
                 header_columns[3].write(row["quality_status"] or "Nicht freigeben")
