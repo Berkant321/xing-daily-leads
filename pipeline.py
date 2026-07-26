@@ -14,7 +14,7 @@ from research import normalize_company as research_normalize_company
 from research import research_company
 from sales_ai import ASSET_KEYS, create_sales_assets
 
-PIPELINE_SCHEMA_VERSION = "6.0.0"
+PIPELINE_SCHEMA_VERSION = "8.0.0"
 
 
 BENEFIT_PATTERNS = {
@@ -549,7 +549,7 @@ def job_family(title: str) -> str:
         "Pflege und Medizin": ["pflege", "medizinische fachang", "arzt", "arztin", "mfa", "gesundheits", "kranken", "zahn"],
         "Elektro und Technik": ["elektroniker", "elektriker", "mechatron", "servicetechn", "sps", "automation", "instandhalt"],
         "Metall und Produktion": ["schlosser", "schwei", "industriemechan", "zerspan", "cnc", "monteur", "metall", "produktion", "maschinenbedien"],
-        "Bau und Engineering": ["bauleiter", "architekt", "ingenieur", "konstrukteur", "projektleiter", "tiefbau", "hochbau", "tga", "kalkulator", "polier"],
+        "Bau und Engineering": ["bauleiter", "architekt", "ingenieur", "konstrukteur", "projektleiter", "tiefbau", "hochbau", "tga", "kalkulator", "polier", "bim", "bauzeichner", "stadtplan", "landschaftsarchitekt", "innenarchitekt"],
         "IT und Daten": ["software", "entwickler", "developer", "devops", "systemadministrator", "it support", "informatik", "data", "cloud", "security"],
         "Vertrieb und Marketing": ["vertrieb", "sales", "account manager", "business development", "marketing", "e commerce", "performance"],
         "Logistik und Einkauf": ["lager", "logistik", "stapler", "fahrer", "disponent", "verlader", "berufskraft", "spedition", "einkauf"],
@@ -573,7 +573,7 @@ def infer_lead_segment(text: str) -> str:
         "Pflege und Medizin": ["ambulante pflege", "pflegedienst", "sozialstation", "pflegefach", "medizinische fachang", "mfa", "arztpraxis", "zahnarzt"],
         "Handwerk und Technik": ["elektroniker", "elektriker", "mechatron", "anlagenmechaniker", "shk", "sanitaer", "heizung", "klima", "servicetechn", "schweiss", "metallbau", "tischler", "schreiner"],
         "Industrie und Produktion": ["produktion", "maschinenbau", "industriemechan", "cnc", "zerspan", "instandhalt", "qualitaetssicherung"],
-        "Bau und Engineering": ["ingenieurbuero", "planungsbuero", "bauleiter", "projektingenieur", "konstrukteur", "architekturbuero", "tga", "kalkulator"],
+        "Bau und Engineering": ["ingenieurbuero", "planungsbuero", "bauleiter", "projektingenieur", "konstrukteur", "architekturbuero", "architekt", "tga", "kalkulator", "bim", "bauzeichner", "stadtplan", "landschaftsarchitekt", "innenarchitekt"],
         "IT und Digitalisierung": ["softwareentwickler", "developer", "devops", "systemadministrator", "softwarehaus", "it dienstleister", "cloud", "data"],
         "Vertrieb und Marketing": ["vertrieb", "sales", "account manager", "business development", "marketing", "e commerce"],
         "Logistik und Einkauf": ["logistik", "lager", "spedition", "disponent", "berufskraft", "einkauf"],
@@ -904,7 +904,10 @@ def build_discovery_leads(
         small_business_score = max([int(float(job.get("small_business_score", 0) or 0)) for job in jobs] or [50])
         size_reason = clean_text(next((job.get("size_reason", "") for job in jobs if job.get("size_reason")), ""))
         broad_campaign = focus in {"Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden"}
-        max_jobs = 25 if broad_campaign else 8
+        if focus == "Chancenmix Architektur Ingenieurwesen Steuer IT":
+            max_jobs = 15
+        else:
+            max_jobs = 25 if broad_campaign else 8
         if size_fit == "Groß oder unpassend" or len(jobs) > max_jobs:
             skipped += 1
             continue

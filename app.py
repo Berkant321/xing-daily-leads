@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -52,44 +53,52 @@ st.set_page_config(
 
 
 CAMPAIGN_PRESETS = {
-    "Breite Massenkampagne": [
-        # Bewusst gemischt sortiert, damit schon das erste Paket mehrere Branchen liefert.
-        "Physiotherapeut", "Steuerfachangestellte", "Elektroniker", "Softwareentwickler",
-        "Pflegefachkraft", "Vertriebsmitarbeiter", "Bauleiter", "Medizinische Fachangestellte",
-        "Mechatroniker", "Bilanzbuchhalter", "Systemadministrator", "Berufskraftfahrer",
-        "Ergotherapeut", "Rechtsanwaltsfachangestellte", "Servicetechniker", "Sales Manager",
-        "Logopäde", "Lohnbuchhalter", "Industriemechaniker", "Disponent",
-        "Zahnmedizinische Fachangestellte", "Konstrukteur", "Projektleiter", "Account Manager",
-        "Pflegedienstleitung", "Finanzbuchhalter", "Anlagenmechaniker SHK", "IT Support",
-        "Schweißer", "Personalreferent", "Recruiter", "Sachbearbeiter",
-        "Controller", "Einkäufer", "Assistenz der Geschäftsführung", "Bürokaufmann",
-        "Kaufmann für Büromanagement", "Industriekaufmann", "Speditionskaufmann", "Lagerist",
-        "Fachkraft für Lagerlogistik", "Logistikmitarbeiter", "Produktionsmitarbeiter", "Maschinenbediener",
-        "CNC Fräser", "CNC Dreher", "Werkzeugmechaniker", "Zerspanungsmechaniker",
-        "Metallbauer", "Tischler", "Kältetechniker", "Elektroniker Betriebstechnik",
-        "Elektroniker Automatisierungstechnik", "Elektroingenieur", "Projektingenieur", "TGA Planer",
-        "Versorgungsingenieur", "Architekt", "Kalkulator Hochbau", "Polier",
-        "Vorarbeiter", "Monteur", "Instandhalter", "Qualitätsmanager",
-        "Qualitätssicherung", "Laborant", "Chemielaborant", "Pharmakant",
-        "Regulatory Affairs Manager", "Clinical Research Associate", "Apotheker", "PTA",
-        "Steuerfachwirt", "Steuerberater", "Wirtschaftsprüfer", "Rechtsanwalt",
-        "Rechtsanwaltsanwärter", "Notarfachangestellte", "Patentanwaltsfachangestellte", "Compliance Manager",
-        "Data Analyst", "DevOps Engineer", "IT Administrator", "IT Projektleiter",
-        "SAP Berater", "ERP Consultant", "Webentwickler", "Fachinformatiker",
-        "Marketing Manager", "Online Marketing Manager", "Customer Service", "Kundenberater",
-        "Außendienstmitarbeiter", "Key Account Manager", "Business Development Manager", "Niederlassungsleiter",
-        "Praxismanager", "Praxisleitung", "Therapeutische Leitung", "Heilerziehungspfleger",
-        "Sozialpädagoge", "Erzieher", "Pädagogische Fachkraft", "Psychologe",
-        "Koch", "Restaurantfachkraft", "Hotelfachkraft", "Hausmeister",
-        "Gebäudereiniger", "Gärtner", "Immobilienkaufmann", "Property Manager",
+    "Chancenmix Architektur Ingenieurwesen Steuer IT": [
+        # Absichtlich gemischt. Schon der erste Klick liefert vier unterschiedliche Zielmärkte.
+        "Architekt", "Steuerfachangestellte", "Softwareentwickler", "Bauleiter",
+        "Projektingenieur", "Bilanzbuchhalter", "Systemadministrator", "TGA Planer",
+        "Elektroingenieur", "Steuerfachwirt", "DevOps Engineer", "BIM Manager",
+        "Konstrukteur", "Lohnbuchhalter", "IT Administrator", "Bauzeichner",
+        "Versorgungsingenieur", "Finanzbuchhalter", "Fachinformatiker", "Projektleiter Architektur",
+        "Landschaftsarchitekt", "Steuerberater", "SAP Berater", "Innenarchitekt",
     ],
-    "Therapiepraxen": [
-        "Physiotherapeut", "Ergotherapeut", "Logopäde", "Sprachtherapeut",
-        "Praxisleitung Therapie", "Therapeutische Leitung",
+    "Architektur und Planung": [
+        "Architekt", "Projektleiter Architektur", "Bauzeichner", "BIM Manager",
+        "Innenarchitekt", "Landschaftsarchitekt", "Stadtplaner", "Architekt Bauleitung",
+    ],
+    "Kleine Ingenieurbüros": [
+        "Bauleiter", "Projektingenieur", "Konstrukteur", "TGA Planer",
+        "Elektroingenieur", "Versorgungsingenieur", "Projektleiter Bau",
     ],
     "Steuerkanzleien": [
         "Steuerfachangestellte", "Steuerfachwirt", "Bilanzbuchhalter",
         "Lohnbuchhalter", "Finanzbuchhalter", "Steuerberater",
+    ],
+    "Kleine IT Unternehmen": [
+        "Softwareentwickler", "Systemadministrator", "DevOps Engineer",
+        "IT Support", "IT Administrator", "Fachinformatiker", "SAP Berater",
+    ],
+    "Breite Massenkampagne": [
+        # Die chancenstarken Zielmärkte stehen bewusst vor Therapie und Pflege.
+        "Architekt", "Steuerfachangestellte", "Softwareentwickler", "Bauleiter",
+        "Projektingenieur", "Bilanzbuchhalter", "Systemadministrator", "TGA Planer",
+        "Elektroingenieur", "Steuerfachwirt", "DevOps Engineer", "BIM Manager",
+        "Konstrukteur", "Lohnbuchhalter", "IT Administrator", "Bauzeichner",
+        "Versorgungsingenieur", "Finanzbuchhalter", "Fachinformatiker", "Projektleiter Architektur",
+        "Landschaftsarchitekt", "Steuerberater", "SAP Berater", "Innenarchitekt",
+        "Elektroniker", "Mechatroniker", "Anlagenmechaniker SHK", "Servicetechniker",
+        "Industriemechaniker", "Schweißer", "Tischler", "Metallbauer", "Kältetechniker",
+        "Vertriebsmitarbeiter", "Sales Manager", "Account Manager", "Key Account Manager",
+        "Außendienstmitarbeiter", "Business Development Manager", "Einkäufer",
+        "Physiotherapeut", "Ergotherapeut", "Logopäde", "Pflegefachkraft",
+        "Medizinische Fachangestellte", "Zahnmedizinische Fachangestellte",
+        "Berufskraftfahrer", "Disponent", "Fachkraft für Lagerlogistik",
+        "Produktionsmitarbeiter", "Maschinenbediener", "Zerspanungsmechaniker",
+        "Personalreferent", "Recruiter", "HR Business Partner", "Sachbearbeiter",
+    ],
+    "Therapiepraxen": [
+        "Physiotherapeut", "Ergotherapeut", "Logopäde", "Sprachtherapeut",
+        "Praxisleitung Therapie", "Therapeutische Leitung",
     ],
     "Recht und Kanzleien": [
         "Rechtsanwaltsfachangestellte", "Rechtsanwalt", "Rechtsanwaltsanwärter",
@@ -111,14 +120,6 @@ CAMPAIGN_PRESETS = {
     "Industrie und Produktion": [
         "Produktionsmitarbeiter", "Maschinenbediener", "CNC Fräser", "CNC Dreher",
         "Zerspanungsmechaniker", "Werkzeugmechaniker", "Instandhalter", "Qualitätssicherung",
-    ],
-    "Kleine Ingenieurbüros": [
-        "Bauleiter", "Projektingenieur", "Konstrukteur", "TGA Planer",
-        "Elektroingenieur", "Versorgungsingenieur", "Projektleiter Bau",
-    ],
-    "Kleine IT Unternehmen": [
-        "Softwareentwickler", "Systemadministrator", "DevOps Engineer",
-        "IT Support", "IT Administrator", "Fachinformatiker", "SAP Berater",
     ],
     "Logistik und Einkauf": [
         "Berufskraftfahrer", "Disponent", "Speditionskaufmann", "Lagerist",
@@ -178,7 +179,7 @@ def _google_config_signature() -> str:
         client_email,
     ])
 
-KMU_SCHEMA_VERSION = "6.0.0"
+KMU_SCHEMA_VERSION = "8.0.0"
 
 
 def exclusive_invitation_subject(company: Any) -> str:
@@ -224,7 +225,7 @@ def _fallback_kmu_segment(row: pd.Series) -> str:
         ("Ambulante Pflege", ("ambulante pflege", "pflegedienst", "sozialstation", "tourenpflege")),
         ("Arztpraxis", ("medizinische fachang", " mfa", "arztpraxis", "zahnarztpraxis", "zahnmedizin")),
         ("Handwerk und Technik", ("elektroniker", "mechatron", "anlagenmechaniker", "shk", "servicetechn", "schwei", "metallbau", "tischler")),
-        ("Ingenieurbüro", ("ingenieur", "planungsbüro", "planungsbuero", "bauleiter", "konstrukteur", "tga")),
+        ("Ingenieurbüro", ("ingenieur", "planungsbüro", "planungsbuero", "bauleiter", "konstrukteur", "tga", "architekt", "bauzeichner", "bim", "stadtplan", "landschaftsarchitekt", "innenarchitekt")),
         ("Kleines IT Unternehmen", ("softwareentwickler", "developer", "devops", "systemadministrator", "softwarehaus")),
     ]
     for segment, terms in groups:
@@ -931,23 +932,77 @@ def parse_regions(text: str) -> list[tuple[str, int]]:
     return regions
 
 
-def next_term_batch(terms: list[str], batch_size: int, logs: pd.DataFrame) -> list[str]:
-    if not terms:
-        return []
-    start = 0
-    if not logs.empty:
-        search_logs = logs[
-            (logs["stage"] == "Suche")
-            & (logs["status"].isin(["checkpoint", "fertig"]))
-            & (logs["processed_terms"] != "")
-        ]
-        if not search_logs.empty:
-            last_terms = [term.strip() for term in search_logs.iloc[-1]["processed_terms"].split("|") if term.strip()]
-            if last_terms and last_terms[-1] in terms:
-                start = (terms.index(last_terms[-1]) + 1) % len(terms)
-    rotated = terms[start:] + terms[:start]
-    return rotated[: min(batch_size, len(terms))]
+def _region_groups(regions: list[tuple[str, int]], group_size: int) -> list[list[tuple[str, int]]]:
+    size = max(1, int(group_size))
+    return [regions[index : index + size] for index in range(0, len(regions), size)]
 
+
+def _scan_task_id(campaign: str, term: str, regions: list[tuple[str, int]]) -> str:
+    region_key = "|".join(f"{city}:{radius}" for city, radius in regions)
+    raw = f"{campaign}|{term}|{region_key}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:14]
+
+
+def _scan_task_marker(campaign: str, term: str, regions: list[tuple[str, int]]) -> str:
+    return f"[SCAN_TASK:{_scan_task_id(campaign, term, regions)}]"
+
+
+def _task_history(logs: pd.DataFrame) -> tuple[set[str], dict[str, int]]:
+    completed: set[str] = set()
+    failures: dict[str, int] = {}
+    if logs is None or logs.empty or "message" not in logs.columns:
+        return completed, failures
+
+    for _, row in logs.iterrows():
+        message = clean_text(row.get("message", ""))
+        match = re.search(r"\[SCAN_TASK:([0-9a-f]{14})\]", message)
+        if not match:
+            continue
+        task_id = match.group(1)
+        status = clean_text(row.get("status", "")).lower()
+        if status == "checkpoint":
+            completed.add(task_id)
+        elif status == "task_fehler":
+            failures[task_id] = failures.get(task_id, 0) + 1
+    return completed, failures
+
+
+def next_search_tasks(
+    terms: list[str],
+    regions: list[tuple[str, int]],
+    task_limit: int,
+    regions_per_task: int,
+    logs: pd.DataFrame,
+    campaign: str,
+) -> tuple[list[tuple[str, list[tuple[str, int]]]], int, int]:
+    """Liefert kleine, kampagnenspezifische Suchaufgaben.
+
+    Jede Kombination aus Suchbegriff und Regionspaket wird separat protokolliert.
+    Dadurch setzt die App nach Neustarts exakt an der nächsten offenen Kombination fort.
+    """
+    groups = _region_groups(regions, regions_per_task)
+    completed, failures = _task_history(logs)
+    pending: list[tuple[int, int, str, list[tuple[str, int]]]] = []
+    blocked = 0
+
+    # Regionspaket zuerst, dann Suchbegriff. So erscheinen im ersten Klick sofort
+    # unterschiedliche Branchen statt viele Regionen desselben Berufs.
+    for group_index, region_group in enumerate(groups):
+        for term_index, term in enumerate(terms):
+            task_id = _scan_task_id(campaign, term, region_group)
+            if task_id in completed:
+                continue
+            failure_count = failures.get(task_id, 0)
+            if failure_count >= 3:
+                blocked += 1
+                continue
+            pending.append((failure_count, group_index * max(1, len(terms)) + term_index, term, region_group))
+
+    # Neue Aufgaben zuerst, bereits einmal fehlgeschlagene Aufgaben danach.
+    pending.sort(key=lambda item: (item[0], item[1]))
+    selected = [(term, region_group) for _, _, term, region_group in pending[: max(1, int(task_limit))]]
+    total_tasks = len(terms) * len(groups)
+    return selected, total_tasks - len(pending) - blocked, blocked
 
 def latest_scan_id(frame: pd.DataFrame) -> str:
     if frame.empty:
@@ -966,7 +1021,7 @@ serpapi_key = str(st.secrets.get("serpapi_key", "")).strip()
 adzuna_app_id = str(st.secrets.get("adzuna_app_id", "")).strip()
 adzuna_api_key = str(st.secrets.get("adzuna_api_key", "")).strip()
 
-st.sidebar.title("XING Daily Leads V6")
+st.sidebar.title("XING Daily Leads V8")
 page = st.sidebar.radio(
     "Bereich",
     ["Daily Leads", "Stellen", "Kampagnen Feedback", "Follow ups", "Alle Leads", "Salesforce Abgleich", "CRM Ausschluss"],
@@ -1123,17 +1178,42 @@ if page == "Daily Leads":
             key="career_urls_v4",
         )
 
-        settings_columns = st.columns(3)
-        days = settings_columns[0].number_input("Veröffentlicht seit Tagen", 1, 30, 14, key="days_v4")
-        max_pages = settings_columns[1].number_input("Seiten je Suche", 1, 3, 1, key="pages_v4")
-        term_batch_size = settings_columns[2].number_input("Suchbegriffe pro Klick", 1, 20, 8, key="term_batch_v60")
+        settings_columns = st.columns(4)
+        days = settings_columns[0].number_input("Veröffentlicht seit Tagen", 1, 30, 14, key="days_v8")
+        max_pages = settings_columns[1].number_input("Seiten je Suche", 1, 3, 1, key="pages_v8")
+        task_batch_size = settings_columns[2].number_input("Suchaufgaben pro Klick", 1, 12, 4, key="task_batch_v8")
+        region_batch_size = settings_columns[3].number_input("Regionen je Suchaufgabe", 1, 6, 3, key="region_batch_v8")
 
         all_terms = [line.strip() for line in terms_text.splitlines() if line.strip()]
-        upcoming_terms = next_term_batch(all_terms, int(term_batch_size), logs)
-        st.info("Nächste Suchrunde: " + (", ".join(upcoming_terms) if upcoming_terms else "keine Begriffe"))
+        try:
+            preview_regions = parse_regions(regions_text)
+            upcoming_tasks, completed_task_count, blocked_task_count = next_search_tasks(
+                all_terms,
+                preview_regions,
+                int(task_batch_size),
+                int(region_batch_size),
+                logs,
+                campaign,
+            )
+            if upcoming_tasks:
+                preview = [
+                    f"{term}: {', '.join(city for city, _ in region_group)}"
+                    for term, region_group in upcoming_tasks
+                ]
+                st.info("Nächste Suchaufgaben: " + " | ".join(preview))
+            else:
+                st.success("Diese Kampagne ist für alle eingetragenen Regionen vollständig durchsucht.")
+            st.caption(
+                f"Fortschritt: {completed_task_count} Suchaufgaben abgeschlossen. "
+                f"{blocked_task_count} Aufgaben sind nach drei Fehlern vorübergehend blockiert."
+            )
+        except Exception:
+            upcoming_tasks = []
+            st.warning("Die Regionsvorschau konnte nicht erstellt werden. Prüfe das Format Ort,Umkreis.")
+
         st.caption(
-            "Standardmäßig werden Unternehmen mit mehr als acht Stellen, mehr als drei Standorten, "
-            "Kettenstrukturen oder stark gemischten Rollen aussortiert. Kontakte folgen in Schritt 2."
+            "Jeder Klick verteilt die Suche auf unterschiedliche Berufsgruppen und kleine Regionspakete. "
+            "Nach einem Neustart wird bei der nächsten offenen Kombination fortgesetzt. Kontakte folgen in Schritt 2."
         )
 
         uploaded = st.file_uploader(
@@ -1181,37 +1261,56 @@ if page == "Daily Leads":
                 st.stop()
 
             scan_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            terms_to_run = next_term_batch(all_terms, int(term_batch_size), logs)
+            tasks_to_run, completed_task_count, blocked_task_count = next_search_tasks(
+                all_terms,
+                regions,
+                int(task_batch_size),
+                int(region_batch_size),
+                logs,
+                campaign,
+            )
+            if not tasks_to_run:
+                st.success("Für diese Kampagne und Regionsliste sind aktuell keine offenen Suchaufgaben vorhanden.")
+                st.stop()
+
             career_urls = [line.strip() for line in career_urls_text.splitlines() if line.strip()]
+            campaign_marker = f"[KAMPAGNE:{campaign}]"
             append_log(
                 scan_id=scan_id,
                 stage="Suche",
                 status="gestartet",
-                processed_terms=" | ".join(terms_to_run),
-                message=f"Suchrunde {campaign} gestartet. Ergebnisse werden nach jedem Begriff gespeichert.",
+                processed_terms=" | ".join(term for term, _ in tasks_to_run),
+                processed_items=str(len(tasks_to_run)),
+                message=(
+                    f"{campaign_marker} Suchrunde gestartet. "
+                    f"{completed_task_count} Aufgaben waren vorher abgeschlossen, {blocked_task_count} blockiert."
+                ),
             )
 
             progress = st.progress(0, text="Suchrunde startet.")
             total_jobs = total_inserted = total_updated = 0
             total_job_inserted = total_job_updated = 0
+            successful_tasks = failed_tasks = 0
             details: list[str] = []
             completed_terms: list[str] = []
 
-            try:
-                for position, term in enumerate(terms_to_run, start=1):
-                    progress.progress(
-                        (position - 1) / max(1, len(terms_to_run)),
-                        text=f"Suche {position} von {len(terms_to_run)}: {term}",
-                    )
-                    term_sources = list(sources)
-                    term_career_urls = career_urls
-                    if position > 1 and "Karriereseiten" in term_sources:
-                        term_sources.remove("Karriereseiten")
-                        term_career_urls = []
+            for position, (term, task_regions) in enumerate(tasks_to_run, start=1):
+                region_names = ", ".join(city for city, _ in task_regions)
+                task_marker = _scan_task_marker(campaign, term, task_regions)
+                progress.progress(
+                    (position - 1) / max(1, len(tasks_to_run)),
+                    text=f"Suche {position} von {len(tasks_to_run)}: {term} in {region_names}",
+                )
+                term_sources = list(sources)
+                term_career_urls = career_urls
+                if position > 1 and "Karriereseiten" in term_sources:
+                    term_sources.remove("Karriereseiten")
+                    term_career_urls = []
 
+                try:
                     parsed_jobs, scan_diagnostics = scan_jobs(
                         terms=[term],
-                        regions=regions,
+                        regions=task_regions,
                         days=int(days),
                         max_pages=int(max_pages),
                         sources=term_sources,
@@ -1256,65 +1355,70 @@ if page == "Daily Leads":
                     total_job_updated += job_updated
                     total_inserted += inserted
                     total_updated += updated
+                    successful_tasks += 1
                     completed_terms.append(term)
                     details.append(
-                        f"{term}: {len(eligible_jobs)} priorisierte Stellen nach CRM Abgleich, "
-                        f"{job_inserted} neue Stellenzeilen, {job_updated} Stellen aktualisiert, "
-                        f"{inserted} neue Firmen, {updated} Firmen aktualisiert."
+                        f"{term} in {region_names}: {len(eligible_jobs)} priorisierte Stellen, "
+                        f"{job_inserted} neue Stellenzeilen, {inserted} neue Firmen."
                     )
-                    details.extend(f"{term}: {message}" for message in scan_diagnostics + discovery_diagnostics)
+                    details.extend(
+                        f"{term} in {region_names}: {message}"
+                        for message in scan_diagnostics + discovery_diagnostics
+                    )
                     append_log(
                         scan_id=scan_id,
                         stage="Suche",
                         status="checkpoint",
-                        processed_terms=" | ".join(completed_terms),
+                        processed_terms=term,
                         processed_items=str(position),
-                        found_jobs=str(total_jobs),
-                        new_leads=str(total_inserted),
-                        updated_leads=str(total_updated),
+                        found_jobs=str(len(eligible_jobs)),
+                        new_leads=str(inserted),
+                        updated_leads=str(updated),
                         message=(
-                            f"{term} gespeichert: {job_inserted} neue Stellen, "
-                            f"{job_updated} aktualisierte Stellen."
+                            f"{task_marker} {campaign_marker} {term} in {region_names} gespeichert: "
+                            f"{job_inserted} neue Stellen, {job_updated} aktualisierte Stellen."
                         ),
                     )
+                except Exception as exc:
+                    failed_tasks += 1
+                    error_text = clean_text(exc)
+                    details.append(f"{term} in {region_names} fehlgeschlagen: {error_text}")
+                    append_log(
+                        scan_id=scan_id,
+                        stage="Suche",
+                        status="task_fehler",
+                        processed_terms=term,
+                        processed_items=str(position),
+                        message=f"{task_marker} {campaign_marker} {term} in {region_names}: {error_text}",
+                    )
+                    # Ein einzelner Quellenfehler darf die anderen Berufsgruppen nicht mehr blockieren.
+                    continue
 
-                progress.progress(1.0, text="Suchrunde abgeschlossen und gespeichert.")
-                append_log(
-                    scan_id=scan_id,
-                    stage="Suche",
-                    status="fertig",
-                    processed_terms=" | ".join(completed_terms),
-                    processed_items=str(len(completed_terms)),
-                    found_jobs=str(total_jobs),
-                    new_leads=str(total_inserted),
-                    updated_leads=str(total_updated),
-                    message="Suchrunde vollständig abgeschlossen.",
-                )
-                st.session_state["last_pipeline_details"] = details
+            progress.progress(1.0, text="Suchrunde abgeschlossen und gespeichert.")
+            append_log(
+                scan_id=scan_id,
+                stage="Suche",
+                status="fertig",
+                processed_terms=" | ".join(completed_terms),
+                processed_items=str(successful_tasks),
+                found_jobs=str(total_jobs),
+                new_leads=str(total_inserted),
+                updated_leads=str(total_updated),
+                message=(
+                    f"{campaign_marker} Suchrunde abgeschlossen: {successful_tasks} erfolgreich, "
+                    f"{failed_tasks} fehlgeschlagen."
+                ),
+            )
+            st.session_state["last_pipeline_details"] = details
+            if successful_tasks:
                 st.success(
-                    f"Gespeichert: {total_job_inserted} neue Stellenzeilen und {total_job_updated} aktualisierte Stellen "
-                    f"im Google Sheet Tab Stellen. Zusätzlich {total_inserted} neue Firmen und "
-                    f"{total_updated} aktualisierte Firmen im Tab Leads."
+                    f"Gespeichert: {total_job_inserted} neue Stellenzeilen und {total_job_updated} aktualisierte Stellen. "
+                    f"Zusätzlich {total_inserted} neue Firmen und {total_updated} aktualisierte Firmen. "
+                    f"Suchaufgaben: {successful_tasks} erfolgreich, {failed_tasks} fehlgeschlagen."
                 )
-            except Exception as exc:
-                append_log(
-                    scan_id=scan_id,
-                    stage="Suche",
-                    status="fehler",
-                    processed_terms=" | ".join(completed_terms),
-                    processed_items=str(len(completed_terms)),
-                    found_jobs=str(total_jobs),
-                    new_leads=str(total_inserted),
-                    updated_leads=str(total_updated),
-                    message=clean_text(exc),
-                )
-                st.session_state["last_pipeline_details"] = details + [f"Abbruch: {clean_text(exc)}"]
-                st.error(
-                    "Die Suchrunde wurde abgebrochen. Bereits fertige Begriffe sind trotzdem gespeichert. "
-                    f"Fehler: {clean_text(exc)}"
-                )
-            finally:
-                progress.empty()
+            else:
+                st.error("Keine Suchaufgabe konnte abgeschlossen werden. Öffne die technischen Details für die Fehlerursachen.")
+            progress.empty()
 
     research_all = research_candidate_indices(frame, max(1, len(frame))) if not frame.empty else []
     with st.expander(f"Schritt 2: Website, Ansprechpartner, Mail und Telefon recherchieren ({len(research_all)} offen)"):
