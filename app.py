@@ -213,6 +213,25 @@ def _safe_pipe_count(value: Any) -> int:
     return max(1, len(parts))
 
 
+def safe_int(value: Any, default: int = 0) -> int:
+    """Wandelt Werte aus Google Sheets robust in ganze Zahlen um."""
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    if not text:
+        return default
+    text = text.replace(" ", "").replace(".", "").replace(",", ".")
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return default
+
+
 def _fallback_kmu_segment(row: pd.Series) -> str:
     text = " ".join([
         str(row.get("firma", "")),
@@ -1102,7 +1121,7 @@ serpapi_key = str(st.secrets.get("serpapi_key", "")).strip()
 adzuna_app_id = str(st.secrets.get("adzuna_app_id", "")).strip()
 adzuna_api_key = str(st.secrets.get("adzuna_api_key", "")).strip()
 
-st.sidebar.title("XING Daily Leads V10")
+st.sidebar.title("XING Daily Leads V10.1")
 page = st.sidebar.radio(
     "Bereich",
     ["Daily Leads", "Stellen", "Kampagnen Feedback", "Follow ups", "Alle Leads", "Salesforce Abgleich", "CRM Ausschluss"],
