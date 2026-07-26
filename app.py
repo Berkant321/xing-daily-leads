@@ -179,7 +179,7 @@ def _google_config_signature() -> str:
         client_email,
     ])
 
-KMU_SCHEMA_VERSION = "8.0.0"
+KMU_SCHEMA_VERSION = "9.0.0"
 
 
 def exclusive_invitation_subject(company: Any) -> str:
@@ -407,6 +407,7 @@ class Storage:
         self.next_row = 2
         self.job_row_map: dict[str, int] = {}
         self.job_next_row = 2
+        self.log_next_row = 2
         self._exclusions_cache: set[str] | None = None
         self.local_path = "leads_local.csv"
         self.local_jobs_path = "stellen_local.csv"
@@ -756,6 +757,29 @@ class Storage:
         self._exclusions_cache = combined
         return combined
 
+    @staticmethod
+    def _recover_log_records(values: list[list[str]]) -> list[list[str]]:
+        """Rekonstruiert alte, horizontal verrutschte Scan Logs.
+
+        Frühere Versionen nutzten append_row ohne stabile Kopfzeile. Google Sheets
+        erkannte deshalb bei jedem Aufruf eine neue Tabelle weiter rechts. Wir suchen
+        in jeder Zeile nach einem ISO Zeitstempel und übernehmen die folgenden Felder.
+        """
+        records: list[list[str]] = []
+        timestamp_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+        width = len(LOG_COLUMNS)
+        for raw_row in values:
+            row = [clean_text(value) for value in raw_row]
+            for start, value in enumerate(row):
+                if not timestamp_pattern.match(value):
+                    continue
+                candidate = row[start : start + width]
+                candidate += [""] * max(0, width - len(candidate))
+                if candidate[1] or candidate[2] or candidate[3]:
+                    records.append(candidate[:width])
+                break
+        return records
+
     def load_logs(self) -> pd.DataFrame:
         if self.mode == "google_error":
             raise RuntimeError(self.error or "Google Sheets ist nicht verbunden.")
@@ -764,17 +788,26 @@ class Storage:
                 frame = pd.read_csv(self.local_log_path, dtype=str).fillna("")
             except FileNotFoundError:
                 frame = pd.DataFrame(columns=LOG_COLUMNS)
+            self.log_next_row = len(frame) + 2
             return frame.reindex(columns=LOG_COLUMNS).fillna("")
 
         values = _google_call(self.log_ws.get_all_values)
-        if not values:
-            _google_call(self.log_ws.update, [LOG_COLUMNS])
-            return pd.DataFrame(columns=LOG_COLUMNS)
-        frame = pd.DataFrame(self._records(values))
-        for column in LOG_COLUMNS:
-            if column not in frame.columns:
-                frame[column] = ""
-        return frame.reindex(columns=LOG_COLUMNS).fillna("")
+        header_ok = bool(values and [clean_text(value) for value in values[0][: len(LOG_COLUMNS)]] == LOG_COLUMNS)
+        if header_ok:
+            records = []
+            for raw_row in values[1:]:
+                row = [clean_text(value) for value in raw_row[: len(LOG_COLUMNS)]]
+                row += [""] * max(0, len(LOG_COLUMNS) - len(row))
+                if any(row):
+                    records.append(row[: len(LOG_COLUMNS)])
+        else:
+            records = self._recover_log_records(values)
+            _google_call(self.log_ws.clear)
+            payload = [LOG_COLUMNS] + records
+            _google_call(self.log_ws.update, payload, "A1")
+
+        self.log_next_row = len(records) + 2
+        return pd.DataFrame(records, columns=LOG_COLUMNS).fillna("")
 
     def append_log(self, record: dict[str, Any]) -> None:
         row = [clean_text(record.get(column, "")) for column in LOG_COLUMNS]
@@ -784,8 +817,18 @@ class Storage:
             current = self.load_logs()
             current.loc[len(current)] = row
             current.to_csv(self.local_log_path, index=False)
+            self.log_next_row = len(current) + 2
             return
-        _google_call(self.log_ws.append_row, row, value_input_option="RAW")
+
+        end_column = _column_letter(len(LOG_COLUMNS))
+        target_row = max(2, int(self.log_next_row or 2))
+        _google_call(
+            self.log_ws.update,
+            [row],
+            f"A{target_row}:{end_column}{target_row}",
+            value_input_option="RAW",
+        )
+        self.log_next_row = target_row + 1
 
 
 @st.cache_resource(show_spinner=False)
@@ -1021,7 +1064,7 @@ serpapi_key = str(st.secrets.get("serpapi_key", "")).strip()
 adzuna_app_id = str(st.secrets.get("adzuna_app_id", "")).strip()
 adzuna_api_key = str(st.secrets.get("adzuna_api_key", "")).strip()
 
-st.sidebar.title("XING Daily Leads V8")
+st.sidebar.title("XING Daily Leads V9")
 page = st.sidebar.radio(
     "Bereich",
     ["Daily Leads", "Stellen", "Kampagnen Feedback", "Follow ups", "Alle Leads", "Salesforce Abgleich", "CRM Ausschluss"],
@@ -1346,7 +1389,8 @@ if page == "Daily Leads":
                         focus=campaign,
                     )
                     frame, inserted, updated, changed_ids = upsert_leads(frame, fresh, scan_id)
-                    frame = apply_crm_status(frame, exclusions)
+                    # CRM Status ist bereits beim Fund bekannt. Kein erneuter Abgleich
+                    # aller Bestandsleads gegen hunderttausende Salesforce Einträge.
                     changed_rows = frame[frame["lead_id"].isin(changed_ids)].copy()
                     persist_rows(changed_rows, frame)
 
@@ -1364,6 +1408,13 @@ if page == "Daily Leads":
                     details.extend(
                         f"{term} in {region_names}: {message}"
                         for message in scan_diagnostics + discovery_diagnostics
+                    )
+                    progress.progress(
+                        position / max(1, len(tasks_to_run)),
+                        text=(
+                            f"Gespeichert {position} von {len(tasks_to_run)}: {term}. "
+                            f"{job_inserted} neue Stellen, {inserted} neue Firmen."
+                        ),
                     )
                     append_log(
                         scan_id=scan_id,

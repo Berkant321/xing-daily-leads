@@ -16,7 +16,7 @@ from urllib3.util.retry import Retry
 BA_API_BASE = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service"
 HEADERS = {
     "X-API-Key": "jobboerse-jobsuche",
-    "User-Agent": "Mozilla/5.0 (compatible; XING-Daily-Leads/6.0)",
+    "User-Agent": "Mozilla/5.0 (compatible; XING-Daily-Leads/9.0)",
     "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
 }
 
@@ -29,6 +29,7 @@ STAFFING_KEYWORDS = {
     "timepartner", "dis ag", "amadeus fire", "ferchau", "wirtz medical",
     "avanti", "all.medi", "medcareer", "pacura med", "persona service",
     "piening", "expertum", "actief", "avitea", "meteor personaldienste",
+    "personalbude", "diepa",
 }
 
 PUBLIC_KEYWORDS = {
@@ -36,6 +37,8 @@ PUBLIC_KEYWORDS = {
     "bundesamt", "landesamt", "ministerium", "polizei", "bundeswehr",
     "agentur für arbeit", "jobcenter", "finanzamt", "justizvollzug",
     "öffentlicher dienst", "tvöd", "tv-l", "kommunalverwaltung",
+    "autobahn gmbh des bundes", "gebäudemanagement schleswig-holstein",
+    "anstalt öffentlichen rechts", "aör", "aoer",
 }
 
 LARGE_COMPANY_KEYWORDS = {
@@ -49,6 +52,8 @@ LARGE_COMPANY_KEYWORDS = {
     "decathlon", "dm-drogerie", "rossmann", "obi", "hornbach", "toom",
     "vonovia", "deutsche wohnen", "deutsche bank", "commerzbank", "santander",
     "sparkasse", "volksbank", "universitätsklinikum", "uniklinik", "klinikum",
+    "fiege", "finanz informatik", "porr", "iu internationale hochschule",
+    "diehl aviation", "hamburger hochbahn", "sprinkenhof", "inros lackner",
 }
 
 # Signale, die auf einen kleinen, direkt ansprechbaren Arbeitgeber hindeuten.
@@ -155,6 +160,10 @@ FOCUS_SEGMENTS = {
     "Bau und Engineering": {"Bau und Engineering"},
     "Kleine IT Unternehmen": {"IT und Digitalisierung"},
     "IT und Digitalisierung": {"IT und Digitalisierung"},
+    "Chancenmix Architektur Ingenieurwesen Steuer IT": {
+        "Bau und Engineering", "Steuer und Buchhaltung", "IT und Digitalisierung"
+    },
+    "Architektur und Planung": {"Bau und Engineering"},
     "Vertrieb und Marketing": {"Vertrieb und Marketing"},
     "Logistik und Einkauf": {"Logistik und Einkauf"},
     "Pharma und Forschung": {"Pharma und Forschung"},
@@ -853,20 +862,101 @@ def _segment_for(combined: str) -> tuple[str, list[str]]:
 
 
 def _number_size_signal(text: str) -> int:
-    """Liest grobe Mitarbeiterangaben aus Texten. 0 bedeutet unbekannt."""
+    """Liest Mitarbeiterangaben einschließlich 5.000 oder 22,000 aus Texten."""
     normal = _norm(text)
-    patterns = [
-        r"(?:ueber|mehr als|rund|ca\.?|circa)?\s*(\d{2,6})\s*(?:mitarbeiter|beschaeftigte|kollegen)",
-        r"(\d{2,6})\+\s*(?:mitarbeiter|beschaeftigte|kollegen)",
-    ]
+    pattern = (
+        r"(?:ueber|mehr als|rund|ca\.?|circa)?\s*"
+        r"(\d{1,3}(?:[\. ,]\d{3})+|\d{2,6})\s*"
+        r"(?:mitarbeiter|mitarbeitende|beschaeftigte|kollegen)"
+    )
     values: list[int] = []
-    for pattern in patterns:
-        for match in re.findall(pattern, normal):
+    for match in re.findall(pattern, normal):
+        digits = re.sub(r"\D", "", str(match))
+        if digits:
             try:
-                values.append(int(match))
-            except (TypeError, ValueError):
+                values.append(int(digits))
+            except ValueError:
                 pass
     return max(values or [0])
+
+
+def _number_location_signal(text: str) -> int:
+    normal = _norm(text)
+    pattern = (
+        r"(?:ueber|mehr als|rund|ca\.?|circa)?\s*"
+        r"(\d{1,3}(?:[\. ,]\d{3})+|\d{1,5})\s*"
+        r"(?:standorte|niederlassungen|filialen)"
+    )
+    values: list[int] = []
+    for match in re.findall(pattern, normal):
+        digits = re.sub(r"\D", "", str(match))
+        if digits:
+            try:
+                values.append(int(digits))
+            except ValueError:
+                pass
+    return max(values or [0])
+
+
+def _segment_for_term(term: str) -> str:
+    value = _norm(term)
+    if any(token in value for token in ("steuer", "bilanzbuch", "lohnbuch", "finanzbuch")):
+        return "Steuer und Buchhaltung"
+    if any(token in value for token in ("software", "devops", "systemadmin", "it admin", "fachinformat", "sap")):
+        return "IT und Digitalisierung"
+    if any(token in value for token in ("architekt", "bauleiter", "ingenieur", "tga", "bim", "konstrukteur", "bauzeichner")):
+        return "Bau und Engineering"
+    return ""
+
+
+def _term_matches_job(term: str, title: str, company: str = "", description: str = "") -> bool:
+    """Verhindert breite API Treffer wie Software Architect bei Architekt."""
+    term_norm = _norm(term)
+    title_norm = _norm(title)
+    company_norm = _norm(company)
+    text = f"{title_norm} {company_norm}"
+
+    if "architekt" in term_norm and "landschaft" not in term_norm and "innen" not in term_norm:
+        if any(token in title_norm for token in (
+            "software architekt", "software-architekt", "enterprise architect",
+            "solution architect", "cloud architect", "it architect", "it/ot",
+            "systemarchitektur", "domain architect",
+        )):
+            return False
+        if "duales studium" in title_norm or "student" in title_norm:
+            return False
+        return "architekt" in title_norm or "architekturburo" in company_norm
+
+    rules = [
+        (("steuerfachang", "steuerfachwirt"), ("steuerfach",)),
+        (("softwareentwick",), ("softwareentwick", "software developer")),
+        (("bauleiter",), ("bauleiter", "bauleitung")),
+        (("projektingenieur",), ("projektingenieur",)),
+        (("bilanzbuch",), ("bilanzbuch",)),
+        (("systemadministrator",), ("systemadministrator", "system admin")),
+        (("tga planer",), ("tga planer", "tga-planer", "tga fachplaner", "fachplaner tga")),
+        (("elektroingenieur",), ("elektroingenieur", "ingenieur elektrotechnik")),
+        (("devops",), ("devops",)),
+        (("bim manager",), ("bim manager", "bim koordinator")),
+        (("konstrukteur",), ("konstrukteur",)),
+        (("lohnbuch",), ("lohnbuch", "payroll")),
+        (("it administrator",), ("it administrator", "it-administrator")),
+        (("bauzeichner",), ("bauzeichner",)),
+        (("versorgungsingenieur",), ("versorgungsingenieur", "ingenieur versorgungstechnik")),
+        (("finanzbuch",), ("finanzbuch",)),
+        (("fachinformat",), ("fachinformat",)),
+        (("projektleiter architektur",), ("projektleiter architektur", "projektleitung architektur")),
+        (("landschaftsarchitekt",), ("landschaftsarchitekt",)),
+        (("steuerberater",), ("steuerberater",)),
+        (("sap berater",), ("sap berater", "sap consultant")),
+        (("innenarchitekt",), ("innenarchitekt",)),
+    ]
+    for term_tokens, title_tokens in rules:
+        if any(token in term_norm for token in term_tokens):
+            return any(token in title_norm for token in title_tokens)
+
+    important = [token for token in term_norm.split() if len(token) >= 4]
+    return bool(important and any(token in text for token in important))
 
 
 def _small_business_profile(
@@ -882,6 +972,16 @@ def _small_business_profile(
     normal = _norm(combined)
     company_normal = _norm(company)
     segment, segment_hits = _segment_for(combined)
+    term_segment = _segment_for_term(term)
+    if term_segment and focus in {
+        "Chancenmix Architektur Ingenieurwesen Steuer IT",
+        "Architektur und Planung",
+        "Kleine Ingenieurbüros",
+        "Kleine IT Unternehmen",
+        "Steuerkanzleien",
+    }:
+        segment = term_segment
+        segment_hits = [term]
     job_count = int(company_data.get("job_count", 1) or 1)
     distinct_titles = int(company_data.get("distinct_titles", 1) or 1)
     location_count = int(company_data.get("location_count", 1) or 1)
@@ -891,6 +991,9 @@ def _small_business_profile(
     enterprise_hits = [keyword for keyword in ENTERPRISE_SIGNALS if _norm(keyword) in normal]
     chain_hits = [keyword for keyword in CHAIN_NAME_SIGNALS if _norm(keyword) in company_normal]
     employee_count = _number_size_signal(description)
+    described_locations = _number_location_signal(description)
+    if described_locations > location_count:
+        location_count = described_locations
 
     reasons: list[str] = []
     score = 50 if broad_mode else 42
@@ -1005,6 +1108,7 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
         "oversize": 0,
         "focus": 0,
         "low_score": 0,
+        "term_mismatch": 0,
     }
 
     for job in unique:
@@ -1014,6 +1118,14 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
         term = job.get("term", "")
         combined = " ".join([company, title, description, term])
 
+        if not _term_matches_job(term, title, company, description):
+            excluded["term_mismatch"] += 1
+            continue
+        company_low = _norm(company)
+        description_low = _norm(description[:1200])
+        if ("personal" in company_low or "vermittlung" in company_low) and "unser kunde" in description_low:
+            excluded["staffing"] += 1
+            continue
         if _hit(combined, STAFFING_KEYWORDS):
             excluded["staffing"] += 1
             continue
@@ -1137,7 +1249,8 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
     diagnostics.append(
         f"Direktkunden Filter ({focus}): {len(unique)} eindeutige Stellen geprüft, {len(output)} Direktkunden priorisiert. "
         f"Raus: Staffing {excluded['staffing']}, öffentlich {excluded['public']}, bekannte Großunternehmen {excluded['large_name']}, "
-        f"zu groß oder Kette {excluded['oversize']}, Kampagne {excluded['focus']}, Score {excluded['low_score']}."
+        f"zu groß oder Kette {excluded['oversize']}, Kampagne {excluded['focus']}, "
+        f"Suchbegriff unpassend {excluded['term_mismatch']}, Score {excluded['low_score']}."
     )
     return output
 

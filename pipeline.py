@@ -14,7 +14,7 @@ from research import normalize_company as research_normalize_company
 from research import research_company
 from sales_ai import ASSET_KEYS, create_sales_assets
 
-PIPELINE_SCHEMA_VERSION = "8.0.0"
+PIPELINE_SCHEMA_VERSION = "9.0.0"
 
 
 BENEFIT_PATTERNS = {
@@ -40,6 +40,7 @@ AGENCY_WORDS = [
     "recruiting agency", "personalservice", "randstad", "adecco",
     "manpower", "persona service", "tempton", "office people",
     "pluss personal", "avitea", "piening", "expertum", "actief",
+    "personalbude", "diepa",
 ]
 
 LARGE_COMPANY_WORDS = [
@@ -50,6 +51,9 @@ LARGE_COMPANY_WORDS = [
     "continental", "kaufland", "allianz", "helios", "asklepios", "sana kliniken",
     "ameos", "korian", "fresenius", "basf", "bayer ag", "rwe ag", "e.on",
     "sparkasse", "volksbank", "tüv nord", "tüv süd", "tüv rheinland",
+    "fiege", "finanz informatik", "porr", "iu internationale hochschule",
+    "diehl aviation", "hamburger hochbahn", "autobahn gmbh des bundes",
+    "gebäudemanagement schleswig holstein", "sprinkenhof",
 ]
 
 STATUSES = [
@@ -720,28 +724,23 @@ def migrate_frame(frame: pd.DataFrame | None) -> pd.DataFrame:
 
 
 def crm_match(company: str, exclusions: set[str]) -> bool:
+    """Schneller Salesforce Abgleich über normalisierte exakte Firmennamen.
+
+    Die frühere Fuzzy Schleife verglich jeden Lead mit jedem Eintrag der großen
+    Ausschlussliste. Bei rund 200.000 Firmen führte das zu hunderten Millionen
+    Vergleichen und ließ Schritt 1 nach der ersten Suchaufgabe scheinbar hängen.
+    Die Normalisierung entfernt bereits Rechtsformen und Schreibzeichen, daher ist
+    der exakte Mengenabgleich für den täglichen Scanner die sichere Standardlogik.
+    """
     normalized = normalize_company(company)
-    if not normalized:
-        return False
-    if normalized in exclusions:
-        return True
-    if len(normalized) < 8:
-        return False
-    for existing in exclusions:
-        if len(existing) < 8:
-            continue
-        if normalized in existing or existing in normalized:
-            if min(len(normalized), len(existing)) / max(len(normalized), len(existing)) >= 0.72:
-                return True
-        if SequenceMatcher(None, normalized, existing).ratio() >= 0.94:
-            return True
-    return False
+    return bool(normalized and normalized in exclusions)
 
 
 def apply_crm_status(frame: pd.DataFrame, exclusions: set[str]) -> pd.DataFrame:
     frame = migrate_frame(frame)
-    frame["crm_status"] = frame["firma"].map(
-        lambda company: "Bereits in Salesforce" if crm_match(company, exclusions) else "Neu"
+    normalized = frame["firma"].map(normalize_company)
+    frame["crm_status"] = normalized.isin(exclusions).map(
+        {True: "Bereits in Salesforce", False: "Neu"}
     )
     return frame
 
