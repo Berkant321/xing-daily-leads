@@ -154,3 +154,14 @@ Enthalten sind:
 6. Preisfreie Erstansprache. Konditionen werden erst nach Interesse individuell geklärt
 
 Empfohlener Ablauf: Zuerst 30 bis 50 Firmen vollständig durch Suche, Recherche und Textgenerierung laufen lassen. Qualität und Rückmeldungen prüfen. Danach die Welle schrittweise bis 500 ausbauen.
+
+## V10.3 Strict Filter
+
+Der Lead Filter wurde grundlegend verschärft.
+
+1. CRM Abgleich nutzt sichere Alias Keys statt nur exakt identischer Firmennamen.
+2. Ein Suchbegriff bestimmt nicht mehr das Unternehmenssegment.
+3. Kleine Direktkunden benötigen jetzt ein echtes Kleinunternehmenssignal.
+4. Alle kleinen Direktkunden speichert nur noch Leads mit Größenfit Klein.
+5. Testpilot Therapie 500 akzeptiert nur Arbeitgeber mit erkennbarem Praxis beziehungsweise Therapieprofil.
+6. Salesforce Schutzschalter blockiert Suchläufe, wenn die Ausschlussbasis offensichtlich fehlt.

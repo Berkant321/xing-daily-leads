@@ -735,24 +735,67 @@ def migrate_frame(frame: pd.DataFrame | None) -> pd.DataFrame:
     return frame
 
 
-def crm_match(company: str, exclusions: set[str]) -> bool:
-    """Schneller Salesforce Abgleich über normalisierte exakte Firmennamen.
+CRM_GENERIC_TOKENS = {
+    "gruppe", "group", "holding", "deutschland", "germany", "international",
+    "services", "service", "solutions", "solution", "company", "unternehmen",
+}
 
-    Die frühere Fuzzy Schleife verglich jeden Lead mit jedem Eintrag der großen
-    Ausschlussliste. Bei rund 200.000 Firmen führte das zu hunderten Millionen
-    Vergleichen und ließ Schritt 1 nach der ersten Suchaufgabe scheinbar hängen.
-    Die Normalisierung entfernt bereits Rechtsformen und Schreibzeichen, daher ist
-    der exakte Mengenabgleich für den täglichen Scanner die sichere Standardlogik.
+
+def company_match_keys(company: str) -> set[str]:
+    """Erzeugt wenige sichere Alias Keys für den Salesforce Abgleich.
+
+    Kein globales Fuzzy Matching: dadurch bleibt der Abgleich auch mit mehreren
+    hunderttausend Accounts schnell. Gleichzeitig werden typische Unterschiede
+    wie BWH Bücker Kunststoffe vs. Bücker Kunststoffe abgefangen.
     """
     normalized = normalize_company(company)
-    return bool(normalized and normalized in exclusions)
+    if not normalized:
+        return set()
+    tokens = normalized.split()
+    keys = {normalized}
+
+    compact = normalized.replace(" ", "")
+    if len(compact) >= 8:
+        keys.add(compact)
+
+    # Kurze Konzern oder Gesellschaftspräfixe wie BWH, BKT, RC nicht zum
+    # Ausschlusskiller werden lassen. Nur anwenden, wenn danach mindestens
+    # zwei aussagekräftige Tokens übrig bleiben.
+    if len(tokens) >= 3 and len(tokens[0]) <= 3:
+        remainder = tokens[1:]
+        if len(remainder) >= 2 and sum(len(t) for t in remainder) >= 8:
+            keys.add(" ".join(remainder))
+            keys.add("".join(remainder))
+
+    core = [token for token in tokens if token not in CRM_GENERIC_TOKENS]
+    if len(core) >= 2 and core != tokens and sum(len(t) for t in core) >= 8:
+        keys.add(" ".join(core))
+        keys.add("".join(core))
+
+    return {key for key in keys if key}
+
+
+def expand_crm_exclusions(companies) -> set[str]:
+    result: set[str] = set()
+    for company in companies:
+        result.update(company_match_keys(str(company)))
+    return result
+
+
+def crm_match(company: str, exclusions: set[str]) -> bool:
+    """Schneller Salesforce Abgleich mit sicheren Alias Keys.
+
+    Die Prüfung bleibt ein Mengenabgleich und skaliert daher auch mit einer sehr
+    großen Ausschlussliste. Fuzzy Vergleiche über die komplette Datenbank werden
+    bewusst vermieden.
+    """
+    return bool(company_match_keys(company) & exclusions)
 
 
 def apply_crm_status(frame: pd.DataFrame, exclusions: set[str]) -> pd.DataFrame:
     frame = migrate_frame(frame)
-    normalized = frame["firma"].map(normalize_company)
-    frame["crm_status"] = normalized.isin(exclusions).map(
-        {True: "Bereits in Salesforce", False: "Neu"}
+    frame["crm_status"] = frame["firma"].map(
+        lambda company: "Bereits in Salesforce" if crm_match(company, exclusions) else "Neu"
     )
     return frame
 

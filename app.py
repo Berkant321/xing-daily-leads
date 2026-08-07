@@ -17,6 +17,8 @@ from pipeline import (
     STATUSES,
     ai_candidate_indices,
     apply_crm_status,
+    company_match_keys,
+    expand_crm_exclusions,
     backfill_jobs_from_leads,
     build_discovery_leads,
     build_job_rows,
@@ -740,7 +742,7 @@ class Storage:
         if self.mode == "local":
             try:
                 frame = pd.read_csv(self.local_exclusion_path, dtype=str).fillna("")
-                result = {normalize_company(value) for value in frame.get("firma", []) if value}
+                result = expand_crm_exclusions(frame.get("firma", []))
             except FileNotFoundError:
                 result = set()
             self._exclusions_cache = set(result)
@@ -756,11 +758,9 @@ class Storage:
             if first_cell != "firma":
                 _google_call(self.exclusion_ws.insert_row, ["firma"], 1)
                 start_index = 0
-            result = {
-                normalize_company(row[0])
-                for row in values[start_index:]
-                if row and normalize_company(row[0])
-            }
+            result = expand_crm_exclusions(
+                row[0] for row in values[start_index:] if row and row[0]
+            )
         self._exclusions_cache = set(result)
         return result
 
@@ -771,16 +771,12 @@ class Storage:
         einzigen Batch angehängt. Dadurch entstehen weder Clear-Requests noch ein
         vollständiges Rewrite bei jedem einzelnen Klick.
         """
-        target = {
-            normalize_company(company)
-            for company in companies
-            if normalize_company(company)
-        }
+        target = expand_crm_exclusions(companies)
         if self.mode == "google_error":
             raise RuntimeError(self.error or "Google Sheets ist nicht verbunden.")
         if self.mode == "local":
             existing = self._exclusions_cache if self._exclusions_cache is not None else self.load_exclusions()
-            combined = set(existing) | target
+            combined = set(existing) | expand_crm_exclusions(target)
             pd.DataFrame({"firma": sorted(combined)}).to_csv(self.local_exclusion_path, index=False)
             self._exclusions_cache = combined
             return combined
@@ -997,11 +993,9 @@ def read_company_file(uploaded_file):
     )
     if not company_column:
         raise ValueError("Keine Firmenspalte erkannt. Nutze zum Beispiel Account Name, Firma oder Unternehmen.")
-    companies = {
-        normalize_company(value)
-        for value in frame[company_column].astype(str)
-        if normalize_company(value)
-    }
+    companies = expand_crm_exclusions(
+        value for value in frame[company_column].astype(str) if normalize_company(value)
+    )
     return companies, company_column, len(frame)
 
 
@@ -1219,6 +1213,7 @@ frame, schema_changed = ensure_kmu_schema(frame)
 frame, subject_changed = ensure_exclusive_subjects(frame)
 frame, quality_changed = refresh_quality(frame)
 exclusions = set(st.session_state["xing_exclusions_cache"])
+CRM_MINIMUM_FOR_SCAN = 1000
 logs = st.session_state["xing_logs_cache"].copy()
 
 if not frame.empty:
@@ -1385,6 +1380,14 @@ if page == "Daily Leads":
                 regions = parse_regions(regions_text)
             except Exception:
                 st.error("Mindestens eine Region hat nicht das Format Ort,Umkreis.")
+                st.stop()
+
+            if len(exclusions) < CRM_MINIMUM_FOR_SCAN:
+                st.error(
+                    f"Salesforce Schutzschalter aktiv: Es sind nur {len(exclusions):,} Ausschluss Keys geladen. "
+                    "Der Suchlauf wird nicht gestartet, damit keine Bestandskunden oder Pool Accounts als Leads entstehen. "
+                    "Bitte zuerst den aktuellen Salesforce Export unter Salesforce Abgleich laden."
+                )
                 st.stop()
 
             sources: list[str] = []

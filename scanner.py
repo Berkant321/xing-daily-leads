@@ -88,6 +88,61 @@ CHAIN_NAME_SIGNALS = {
     "services deutschland", "solutions deutschland", "germany gmbh", "europe gmbh",
 }
 
+EMPLOYER_SEGMENT_KEYWORDS = {
+    "Therapiepraxis": {
+        "physiotherapie", "ergotherapie", "logopaedie", "logopadie",
+        "sprachtherapie", "therapiepraxis", "therapiezentrum", "heilmittelpraxis",
+    },
+    "Steuer und Buchhaltung": {
+        "steuerberatung", "steuerkanzlei", "steuerberaterkanzlei",
+        "wirtschaftspruefung", "wirtschaftsprufung", "steuerberatungsgesellschaft",
+    },
+    "Recht und Kanzlei": {
+        "rechtsanwaltskanzlei", "rechtsanwaltkanzlei", "wirtschaftskanzlei",
+        "rechtsanwaltsgesellschaft", "notariat", "anwaltskanzlei",
+    },
+    "Pflege und Medizin": {
+        "pflegedienst", "ambulante pflege", "arztpraxis", "zahnarztpraxis",
+        "medizinisches versorgungszentrum", "mvz",
+    },
+    "Handwerk und Technik": {
+        "elektrotechnik", "haustechnik", "sanitaer", "heizung", "klimatechnik",
+        "kaeltetechnik", "metallbau", "tischlerei", "schreinerei", "meisterbetrieb",
+    },
+    "Industrie und Produktion": {
+        "kunststoff", "kunststoffe", "produktion", "fertigung", "maschinenbau",
+        "anlagenbau", "werkzeugbau", "metallverarbeitung", "automotive",
+    },
+    "Bau und Engineering": {
+        "ingenieurbuero", "planungsbuero", "architekturbuero", "bauunternehmen",
+        "tga planung", "fachplanung",
+    },
+    "IT und Digitalisierung": {
+        "softwarehaus", "it dienstleister", "softwareunternehmen", "digitalagentur",
+        "managed service provider",
+    },
+    "Logistik und Einkauf": {
+        "spedition", "logistikdienstleister", "transportlogistik", "lagerlogistik",
+    },
+    "Pharma und Forschung": {
+        "pharmaunternehmen", "pharma", "labor", "biotech", "medizintechnik",
+    },
+    "Gastronomie und Hotellerie": {
+        "hotel", "restaurant", "gasthof", "gasthaus", "resort",
+    },
+}
+
+THERAPY_NON_PRACTICE_SIGNALS = {
+    "klinikum", "krankenhaus", "universitaetsklinikum", "uniklinik", "reha klinik",
+    "pflegeheim", "seniorenheim", "personaldienstleister", "zeitarbeit", "staffing",
+}
+
+SMALL_ORGANIZATION_SIGNALS = {
+    "familienunternehmen", "familienbetrieb", "inhabergefuehrt", "inhabergeführt",
+    "inhaber gefuehrt", "inhaber geführt", "mittelstaendisch", "mittelständisch",
+    "kleines team", "kleines unternehmen",
+}
+
 SEGMENT_KEYWORDS = {
     "Therapiepraxis": {
         "physio", "ergotherapeut", "ergotherapie", "logopä", "logopaed",
@@ -848,17 +903,20 @@ def _company_stats(jobs: list[dict]) -> dict[str, dict]:
 
 
 
-def _segment_for(combined: str) -> tuple[str, list[str]]:
-    normal = _norm(combined)
-    best_segment = "Kleiner Direktkunde"
+def _segment_for_employer(company: str, description: str) -> tuple[str, list[str]]:
+    """Klassifiziert den Arbeitgeber, nicht die gesuchte Rolle."""
+    company_normal = _norm(company)
+    intro_normal = _norm(description[:1800])
+    normal = f"{company_normal} {intro_normal}"
+    best_segment = "Direktkunde"
     best_hits: list[str] = []
-    for segment, keywords in SEGMENT_KEYWORDS.items():
-        if not keywords:
-            continue
+    for segment, keywords in EMPLOYER_SEGMENT_KEYWORDS.items():
         hits = [keyword for keyword in keywords if _norm(keyword) in normal]
         if len(hits) > len(best_hits):
             best_segment = segment
             best_hits = hits
+    if best_segment == "Therapiepraxis" and any(_norm(x) in normal for x in THERAPY_NON_PRACTICE_SIGNALS):
+        return "Pflege und Medizin", ["Klinik oder Einrichtung"]
     return best_segment, best_hits[:4]
 
 
@@ -969,26 +1027,18 @@ def _small_business_profile(
     company_data: dict,
     focus: str,
 ) -> dict[str, Any]:
-    combined = " ".join([company, title, description, term])
+    combined = " ".join([company, title, description])
     normal = _norm(combined)
     company_normal = _norm(company)
-    segment, segment_hits = _segment_for(combined)
-    term_segment = _segment_for_term(term)
-    if term_segment and focus in {
-        "Chancenmix Architektur Ingenieurwesen Steuer IT",
-        "Architektur und Planung",
-        "Kleine Ingenieurbüros",
-        "Kleine IT Unternehmen",
-        "Steuerkanzleien",
-    }:
-        segment = term_segment
-        segment_hits = [term]
+    segment, segment_hits = _segment_for_employer(company, description)
     job_count = int(company_data.get("job_count", 1) or 1)
     distinct_titles = int(company_data.get("distinct_titles", 1) or 1)
     location_count = int(company_data.get("location_count", 1) or 1)
     broad_mode = focus in {"Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden"}
 
-    small_hits = [keyword for keyword in SMALL_BUSINESS_SIGNALS if _norm(keyword) in normal]
+    small_hits = [keyword for keyword in SMALL_BUSINESS_SIGNALS if _norm(keyword) in company_normal]
+    small_hits += [keyword for keyword in SMALL_ORGANIZATION_SIGNALS if _norm(keyword) in _norm(description[:1800])]
+    small_hits = list(dict.fromkeys(small_hits))
     enterprise_hits = [keyword for keyword in ENTERPRISE_SIGNALS if _norm(keyword) in normal]
     chain_hits = [keyword for keyword in CHAIN_NAME_SIGNALS if _norm(keyword) in company_normal]
     employee_count = _number_size_signal(description)
@@ -1080,12 +1130,19 @@ def _small_business_profile(
         hard_reasons.append("passt nicht zur gewählten Kampagne")
 
     score = max(0, min(100, score))
+    positive_small_evidence = bool(
+        small_hits
+        or (employee_count and employee_count <= 50)
+        or segment in {"Therapiepraxis", "Steuer und Buchhaltung", "Recht und Kanzlei"}
+    )
     if hard_reasons or score < (25 if broad_mode else 35):
         size_fit = "Groß oder unpassend"
-    elif score >= 70:
+    elif score >= 70 and positive_small_evidence:
         size_fit = "Klein"
     else:
         size_fit = "Mittel"
+        if not positive_small_evidence and score > 64:
+            score = 64
 
     return {
         "segment": segment,
@@ -1151,6 +1208,12 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
                 excluded["focus"] += 1
             else:
                 excluded["oversize"] += 1
+            continue
+        if focus == "Alle kleinen Direktkunden" and profile["size_fit"] != "Klein":
+            excluded["oversize"] += 1
+            continue
+        if focus == "Testpilot Therapie 500" and profile["segment"] != "Therapiepraxis":
+            excluded["focus"] += 1
             continue
 
         score = 10
