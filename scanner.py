@@ -146,6 +146,7 @@ SEGMENT_KEYWORDS = {
 _ALL_SEGMENTS = set(SEGMENT_KEYWORDS)
 
 FOCUS_SEGMENTS = {
+    "Testpilot Therapie 500": {"Therapiepraxis"},
     "Breite Massenkampagne": _ALL_SEGMENTS,
     "Alle Direktkunden": _ALL_SEGMENTS,
     "Alle kleinen Direktkunden": _ALL_SEGMENTS,

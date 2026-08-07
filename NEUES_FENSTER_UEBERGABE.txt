@@ -1,0 +1,25 @@
+Wir arbeiten am XING Daily Leads Tool im Repository Berkant321/xing-daily-leads auf dem Branch main. Streamlit startet app.py.
+
+Der aktuelle Arbeitsstand ist V10.1 vom 26. Juli 2026 und besteht aus app.py, pipeline.py, scanner.py, research.py, sales_ai.py und requirements.txt. Alle Dateien müssen exakt so heißen, weil die internen Imports diese Namen verwenden.
+
+Das Tool ist eine schlanke Vorstufe vor Salesforce und ausdrücklich kein zweites CRM. Es sucht neue Unternehmen mit offenen Stellen, priorisiert kleine und mittelständische Direktkunden, gleicht sie mit der Salesforce Ausschlussliste ab, recherchiert Website, Ansprechpartner, E Mail und Telefon und erstellt anschließend Vertriebstexte. Calls, Angebote und Kennzahlen bleiben in Salesforce.
+
+Die Verarbeitung läuft in drei getrennten Schritten. Zuerst werden Stellen gesucht und sofort gespeichert. Danach erfolgt die Website und Kontaktrecherche. Anschließend werden die individuellen Texte erstellt.
+
+Quellen sind Bundesagentur für Arbeit, Adzuna, Google Jobs über SerpApi sowie direkte Karriereseiten und ATS Boards. Die breite Massenkampagne enthält über 50 Suchbegriffe aus Architektur, Ingenieurwesen, Steuer, IT, Handwerk, Industrie, Vertrieb, Therapie, Pflege, Medizin, Logistik, Personal und Verwaltung.
+
+Standardmäßig werden Stellen aus den letzten 14 Tagen gesucht. Die voreingestellten Regionen sind Hamburg, Bremen, Hannover, Münster, Dortmund, Köln, Frankfurt am Main, Stuttgart, Nürnberg, München, Leipzig und Berlin.
+
+Google Sheets verwendet die Tabellenblätter Leads, Stellen, CRM_Ausschluss und Scan_Log. Ohne Google Sheets läuft ein lokaler CSV Testmodus.
+
+Die Salesforce Ausschlussliste umfasste zuletzt rund 379.000 Unternehmen mit Bundesland. Bereits vorhandene Firmen werden vor der weiteren Verarbeitung ausgeschlossen.
+
+Die Textqualität wird mit 0 bis 100 Punkten bewertet. Ab 85 Punkten und erfüllten Pflichtkriterien ist ein Lead versandbereit. Persönliche oder Recruiting E Mail Adressen haben Vorrang vor allgemeinen Info Adressen. Der Betreff lautet automatisch Exklusive Einladung | Unternehmensname.
+
+Der letzte dokumentierte Live Datenstand einer früheren Version vom 25. Juli 2026 war fehlerhaft. Es gab 317 Stellen und 168 eindeutige Arbeitgeber, aber keine Ansprechpartner oder öffentlichen E Mail Adressen. Alle Stellen waren dem Suchbegriff Physiotherapeut zugeordnet und die breite Kampagne lieferte keine breite Mischung. Danach wurden Scanner, Pipeline, Recherche und Oberfläche deutlich erweitert.
+
+Die aktuelle V10.1 enthält den safe_int Fix, Suchaufgaben nach Berufsgruppe und Region, sofortige Speicherung, getrennte Recherche und Texterstellung sowie Fehlerisolierung je Suchaufgabe. Die Python Syntax aller Dateien ist geprüft. Ein vollständiger Live Test mit echten Zugangsdaten nach dem letzten Umbau ist noch nicht dokumentiert. Der nächste sinnvolle Schritt ist daher ein kleiner kontrollierter Test mit Nur neue Firmen, 14 Tagen, einer Seite, zehn Firmen für die Recherche und acht Suchbegriffen.
+
+
+V10.2 Ergänzung vom 6. August 2026:
+Die Kampagne Testpilot Therapie 500 wurde ergänzt. Sie sucht deutschlandweit nach Physio, Ergo und Logopädie Praxen, markiert Leads mit der Kampagne, zeigt den Fortschritt bis 500 Firmen und erzeugt eine eigene Testpilot Ansprache. Die Ansprache erklärt Stellenanzeige plus TalentManager für zwei Monate statt direkter Festlegung auf zwölf Monate und nennt bewusst keinen Preis.

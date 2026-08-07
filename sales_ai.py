@@ -35,6 +35,17 @@ REQUIRED_MAIL_PHRASES = (
     "vormittags oder nachmittags",
 )
 
+TESTPILOT_CAMPAIGN = "Testpilot Therapie 500"
+TESTPILOT_REQUIRED_PHRASES = (
+    "Testpilot",
+    "zwei Monate",
+    "zwölf Monate",
+    "Stellenanzeige",
+    "TalentManager",
+    "direkt ansprechen",
+    "Position noch offen",
+)
+
 
 def openai_available() -> bool:
     return OpenAI is not None
@@ -76,7 +87,7 @@ def _salutation(person: str) -> str:
         title = "Frau" if match.group(1).lower() == "frau" else "Herr"
         name = match.group(2).strip()
         parts = name.split()
-        surname = " ".join(parts[-2:]) if parts and parts[-2].lower() in {"von", "van", "de"} else parts[-1]
+        surname = " ".join(parts[-2:]) if len(parts) >= 2 and parts[-2].lower() in {"von", "van", "de"} else parts[-1]
         return f"Guten Tag {title} {surname},"
     return f"Guten Tag {person},"
 
@@ -257,6 +268,103 @@ Berkant Devrim"""
     return result
 
 
+
+def _testpilot_assets(
+    company: str,
+    jobs: list[dict],
+    benefits: list[str],
+    person: str,
+    research: dict[str, Any],
+) -> dict[str, str]:
+    titles = _job_titles(jobs)
+    title_phrase = _natural_join(titles, limit=3)
+    title_one = titles[0] if titles else "Ihre offene Position"
+    family = _job_family(titles)
+    cities: list[str] = []
+    for job in jobs:
+        city = _clean_single(job.get("city", ""))
+        if city and city not in cities:
+            cities.append(city)
+    salutation = _salutation(person)
+    context_sentence, evidence = _benefit_sentence(benefits, family, cities)
+
+    mail = f"""{salutation}
+
+Sie suchen aktuell {title_phrase}. {context_sentence}
+
+Genau deshalb möchte ich Sie als Testpilot zu unserer aktuellen XING Kampagne einladen.
+
+Statt sich direkt für zwölf Monate festzulegen, können Sie eine XING Stellenanzeige und den TalentManager zwei Monate im eigenen Recruiting testen. Die Anzeige sorgt für Sichtbarkeit und eingehende Bewerbungen. Parallel können Sie passende Fachkräfte selbst auswählen und direkt ansprechen, auch wenn diese aktuell nicht aktiv suchen.
+
+So warten Sie nicht nur darauf, wer sich bewirbt, sondern entscheiden selbst, wen Sie für {company} kennenlernen möchten.
+
+Ist die Position noch offen?
+
+Beste Grüße
+Berkant Devrim
+Senior Account Executive
+XING"""
+
+    opener = (
+        f"Guten Tag, Berkant Devrim von XING. Ich komme direkt zum Punkt. "
+        f"Bei {company} suchen Sie aktuell {title_phrase}. Wir öffnen gerade einen Testlauf, "
+        "bei dem Stellenanzeige und TalentManager zwei Monate statt direkt zwölf Monate genutzt werden können. "
+        "Wie lösen Sie die Suche aktuell und wo fehlt Ihnen noch die passende Resonanz?"
+    )
+
+    discovery = "\n".join([
+        "1. Welche therapeutische Position hat aktuell die höchste Priorität?",
+        "2. Seit wann ist die Stelle offen?",
+        "3. Wie viele fachlich passende Bewerbungen sind bisher angekommen?",
+        "4. Über welche Kanäle suchen Sie aktuell?",
+        "5. Erreichen Sie dort nur aktiv Suchende oder auch wechselbereite Fachkräfte?",
+        "6. Welche Folgen hat die offene Stelle für Auslastung, Termine und Team?",
+        "7. Welche weiteren Einstellungen planen Sie in den kommenden zwölf Monaten?",
+        "8. Was müsste ein zweimonatiger Testlauf zeigen, damit Sie ihn als sinnvoll bewerten?",
+    ])
+
+    challenger = (
+        "Eine einzelne Anzeige erreicht vor allem Menschen, die gerade aktiv suchen. "
+        "Die größere Reserve liegt bei Therapeutinnen und Therapeuten, die beschäftigt sind, "
+        "aber für bessere Bedingungen offen wären. Der Testlauf verbindet beide Wege, ohne direkt zwölf Monate festzulegen."
+    )
+
+    follow1 = f"""{salutation}
+
+ich greife meine Einladung für {company} noch einmal auf.
+
+Der Testlauf verbindet eine XING Stellenanzeige mit dem TalentManager für zwei Monate. Sie gewinnen Bewerbungen und können parallel passende Fachkräfte selbst auswählen und direkt ansprechen, statt sich sofort für zwölf Monate festzulegen.
+
+Ist {title_one} weiterhin offen?
+
+Beste Grüße
+Berkant Devrim"""
+
+    follow2 = f"""{salutation}
+
+ist die Position inzwischen besetzt, hake ich das Thema gerne ab.
+
+Falls die Suche noch offen ist, können Sie Stellenanzeige und TalentManager zwei Monate im eigenen Recruiting testen und danach auf Grundlage Ihrer Ergebnisse entscheiden.
+
+Beste Grüße
+Berkant Devrim"""
+
+    result = {
+        "erstmail_betreff": f"Exklusive Einladung | {company}",
+        "erstmail": mail,
+        "call_opener": opener,
+        "discovery_fragen": discovery,
+        "challenger_reframe": challenger,
+        "follow_up_1": follow1,
+        "follow_up_2": follow2,
+        "personalization_evidence": evidence,
+        "mail_variant": "Testpilot Therapie V1",
+        "ai_status": "Fallback genutzt",
+    }
+    for key in ASSET_KEYS:
+        result[key] = _no_customer_hyphens(_clean_multiline(result[key]))
+    return result
+
 def _extract_json_object(raw: str) -> dict[str, Any]:
     raw = str(raw or "").strip()
     if raw.startswith("```"):
@@ -284,14 +392,15 @@ def _response_text(response: Any) -> str:
     return "\n".join(chunks)
 
 
-def _valid_campaign_mail(mail: str, company: str) -> bool:
+def _valid_campaign_mail(mail: str, company: str, campaign: str = "") -> bool:
     text = _clean_multiline(mail)
     words = len(re.findall(r"\b\w+\b", text))
-    if not 105 <= words <= 195:
+    if not 95 <= words <= 195:
         return False
     if company.lower() not in text.lower():
         return False
-    return all(phrase.lower() in text.lower() for phrase in REQUIRED_MAIL_PHRASES)
+    required = TESTPILOT_REQUIRED_PHRASES if campaign == TESTPILOT_CAMPAIGN else REQUIRED_MAIL_PHRASES
+    return all(phrase.lower() in text.lower() for phrase in required)
 
 
 def create_sales_assets(
@@ -303,9 +412,14 @@ def create_sales_assets(
     research: dict[str, Any] | None,
     api_key: str,
     model: str = "gpt-5-mini",
+    campaign: str = "",
 ) -> dict[str, str]:
     research = research or {}
-    fallback = _fallback_assets(company, jobs, benefits, person, research)
+    fallback = (
+        _testpilot_assets(company, jobs, benefits, person, research)
+        if campaign == TESTPILOT_CAMPAIGN
+        else _fallback_assets(company, jobs, benefits, person, research)
+    )
     if OpenAI is None:
         fallback["ai_status"] = "Fallback: OpenAI Paket fehlt"
         return fallback
@@ -327,6 +441,29 @@ def create_sales_assets(
     website_text = _clean_single(research.get("text", ""))[:12000]
     exact_subject = f"Exklusive Einladung | {company}"
     deterministic_variant = int(hashlib.sha1(company.encode("utf-8")).hexdigest()[:2], 16) % 2 + 1
+    if campaign == TESTPILOT_CAMPAIGN:
+        campaign_rules = """
+Spezielle Kampagne Testpilot Therapie:
+4. Ein eigener Absatz lädt das Unternehmen als Testpilot zur aktuellen XING Kampagne ein.
+5. Erkläre klar: Statt sich direkt für zwölf Monate festzulegen, können Stellenanzeige und TalentManager zwei Monate getestet werden.
+6. Die Stellenanzeige bringt Sichtbarkeit und Bewerbungen. Der TalentManager ermöglicht die gezielte Auswahl und direkte Ansprache passender Fachkräfte.
+7. Verwende sinngemäß: So warten Sie nicht nur darauf, wer sich bewirbt, sondern entscheiden selbst, wen Sie kennenlernen möchten.
+8. Die Abschlussfrage lautet: Ist die Position noch offen?
+9. Keine Preise und keine Rabatte nennen.
+10. Die Erstmail umfasst 105 bis 160 Wörter.
+"""
+        mail_variant_name = f"Testpilot Therapie V{deterministic_variant}"
+    else:
+        campaign_rules = """
+4. Danach steht als eigener Absatz exakt sinngemäß: Deshalb möchte ich Sie zu unserer aktuellen XING Kampagne einladen.
+5. Erkläre, dass es nicht nur darum geht, Stellen zu veröffentlichen und auf Bewerbungen zu warten. Passende Fachkräfte sollen gezielt identifiziert und direkt angesprochen werden können.
+6. Nutze ausdrücklich den Gedanken: So drehen Sie den Spieß um und entscheiden selbst, welche Fachkräfte Sie kennenlernen möchten.
+7. Die Abschlussfrage lautet: Passt Ihnen ein kurzer Austausch kommende Woche eher vormittags oder nachmittags?
+8. Signatur: Beste Grüße, Berkant Devrim, Senior Account Executive, XING.
+9. Die Erstmail umfasst 120 bis 175 Wörter.
+10. Keine Bindestriche, keine Gedankenstriche, keine Produktliste, keine Preise, keine unbelegten XING Kennzahlen, keine künstliche Verknappung.
+"""
+        mail_variant_name = f"Exklusive Einladung V{deterministic_variant}"
 
     prompt = f"""
 Du schreibst für Berkant Devrim, Senior Account Executive bei XING, eine maßgeschneiderte Kaltakquise.
@@ -336,14 +473,9 @@ Verbindlicher Stil der Erstmail:
 1. Der Betreff lautet exakt: {exact_subject}
 2. Beginne mit einer korrekten persönlichen Anrede. Wenn Frau oder Herr nicht sicher geliefert wurde, erfinde keine geschlechtliche Anrede.
 3. Der erste Absatz nennt die aktuelle Personalsuche und genau ein belegtes, individuelles Merkmal des Unternehmens oder der Stellen. Kein Lob und keine Schleimerei.
-4. Danach steht als eigener Absatz exakt sinngemäß: Deshalb möchte ich Sie zu unserer aktuellen XING Kampagne einladen.
-5. Erkläre, dass es nicht nur darum geht, Stellen zu veröffentlichen und auf Bewerbungen zu warten. Passende Fachkräfte sollen gezielt identifiziert und direkt angesprochen werden können.
-6. Nutze ausdrücklich den Gedanken: So drehen Sie den Spieß um und entscheiden selbst, welche Fachkräfte Sie kennenlernen möchten.
-7. Die Abschlussfrage lautet: Passt Ihnen ein kurzer Austausch kommende Woche eher vormittags oder nachmittags?
-8. Signatur: Beste Grüße, Berkant Devrim, Senior Account Executive, XING.
-9. Die Erstmail umfasst 120 bis 175 Wörter.
-10. Keine Bindestriche, keine Gedankenstriche, keine Produktliste, keine Preise, keine unbelegten XING Kennzahlen, keine künstliche Verknappung.
+{campaign_rules}
 11. Ruhig, direkt, professionell und menschlich. Kein Werbeton.
+12. Keine Bindestriche oder Gedankenstriche in Kundentexten.
 
 Call und Gespräch:
 Der Call Opener setzt einen klaren Frame und fragt nach der tatsächlichen Besetzbarkeit.
@@ -375,7 +507,7 @@ personalization_evidence
 mail_variant
 
 personalization_evidence nennt in höchstens 25 Wörtern den konkreten belegten Fakt, auf dem der erste Absatz basiert.
-mail_variant lautet Exklusive Einladung V{deterministic_variant}.
+mail_variant lautet exakt {mail_variant_name}.
 Keine Markdown Formatierung.
 """
 
@@ -388,7 +520,7 @@ Keine Markdown Formatierung.
             value = _clean_multiline(data.get(key, ""))
             result[key] = _no_customer_hyphens(value) if value else fallback[key]
         result["erstmail_betreff"] = exact_subject
-        if not _valid_campaign_mail(result["erstmail"], company):
+        if not _valid_campaign_mail(result["erstmail"], company, campaign):
             result["erstmail"] = fallback["erstmail"]
             mail_source = "Mailstruktur durch Fallback gesichert"
         else:

@@ -14,7 +14,7 @@ from research import normalize_company as research_normalize_company
 from research import research_company
 from sales_ai import ASSET_KEYS, create_sales_assets
 
-PIPELINE_SCHEMA_VERSION = "9.0.0"
+PIPELINE_SCHEMA_VERSION = "10.0.0"
 
 
 BENEFIT_PATTERNS = {
@@ -91,6 +91,7 @@ COLUMNS = [
     "scan_id",
     "times_seen",
     "source_list",
+    "kampagne",
     "benefits",
     "ansprechpartner",
     "rolle",
@@ -295,14 +296,25 @@ def evaluate_lead_quality(row: dict[str, Any]) -> tuple[int, str, str]:
     else:
         gaps.append("Betreff weicht ab")
 
-    required = [
-        "XING Kampagne",
-        "nicht nur darum",
-        "gezielt",
-        "direkt ansprechen",
-        "drehen Sie den Spieß um",
-        "vormittags oder nachmittags",
-    ]
+    if clean_text(row.get("kampagne", "")) == "Testpilot Therapie 500":
+        required = [
+            "Testpilot",
+            "zwei Monate",
+            "zwölf Monate",
+            "Stellenanzeige",
+            "TalentManager",
+            "direkt ansprechen",
+            "Position noch offen",
+        ]
+    else:
+        required = [
+            "XING Kampagne",
+            "nicht nur darum",
+            "gezielt",
+            "direkt ansprechen",
+            "drehen Sie den Spieß um",
+            "vormittags oder nachmittags",
+        ]
     found = sum(1 for phrase in required if phrase.lower() in mail.lower())
     score += round(found / len(required) * 13)
     if found == len(required):
@@ -964,6 +976,7 @@ def build_discovery_leads(
             "veroeffentlicht_am": max([job.get("published", "") for job in jobs if job.get("published")] or [""]),
             "zuletzt_gefunden": date.today().isoformat(),
             "scan_id": scan_id,
+            "kampagne": focus,
             "source_list": " | ".join(unique([
                 source.strip()
                 for job in jobs
@@ -1276,6 +1289,7 @@ def generate_lead_assets(
             research=research,
             api_key=api_key,
             model=model,
+            campaign=item.get("kampagne", ""),
         )
     except Exception as exc:
         item["ai_attempts"] = str(attempts)

@@ -53,6 +53,15 @@ st.set_page_config(
 
 
 CAMPAIGN_PRESETS = {
+    "Testpilot Therapie 500": [
+        "Physiotherapeut", "Physiotherapeutin", "Physiotherapie",
+        "Ergotherapeut", "Ergotherapeutin", "Ergotherapie",
+        "Logopäde", "Logopädin", "Logopädie",
+        "Sprachtherapeut", "Sprachtherapeutin",
+        "Atem Sprech Stimmlehrer",
+        "Praxisleitung Physiotherapie", "Fachliche Leitung Physiotherapie",
+        "Therapeutische Leitung",
+    ],
     "Chancenmix Architektur Ingenieurwesen Steuer IT": [
         # Absichtlich gemischt. Schon der erste Klick liefert vier unterschiedliche Zielmärkte.
         "Architekt", "Steuerfachangestellte", "Softwareentwickler", "Bauleiter",
@@ -155,6 +164,24 @@ DEFAULT_REGIONS = [
     ("Berlin", 200),
 ]
 
+TESTPILOT_THERAPY_REGIONS = [
+    ("Hamburg", 120), ("Bremen", 100), ("Hannover", 110), ("Kiel", 100),
+    ("Rostock", 120), ("Berlin", 130), ("Potsdam", 90), ("Magdeburg", 110),
+    ("Leipzig", 110), ("Dresden", 110), ("Erfurt", 110), ("Kassel", 110),
+    ("Nürnberg", 110), ("München", 130), ("Augsburg", 90), ("Stuttgart", 120),
+    ("Freiburg im Breisgau", 100), ("Frankfurt am Main", 120), ("Mannheim", 100),
+    ("Saarbrücken", 100), ("Köln", 110), ("Düsseldorf", 100), ("Dortmund", 100),
+    ("Münster", 100), ("Bielefeld", 100),
+]
+
+CAMPAIGN_REGIONS = {
+    "Testpilot Therapie 500": TESTPILOT_THERAPY_REGIONS,
+}
+
+CAMPAIGN_TARGETS = {
+    "Testpilot Therapie 500": 500,
+}
+
 
 def _secret_text(name: str, default: str = "") -> str:
     """Liest einen Streamlit Secret Wert robust als getrimmten Text."""
@@ -179,7 +206,7 @@ def _google_config_signature() -> str:
         client_email,
     ])
 
-KMU_SCHEMA_VERSION = "9.0.0"
+KMU_SCHEMA_VERSION = "10.0.0"
 
 
 def exclusive_invitation_subject(company: Any) -> str:
@@ -1121,7 +1148,7 @@ serpapi_key = str(st.secrets.get("serpapi_key", "")).strip()
 adzuna_app_id = str(st.secrets.get("adzuna_app_id", "")).strip()
 adzuna_api_key = str(st.secrets.get("adzuna_api_key", "")).strip()
 
-st.sidebar.title("XING Daily Leads V10.1")
+st.sidebar.title("XING Daily Leads V10.2")
 page = st.sidebar.radio(
     "Bereich",
     ["Daily Leads", "Stellen", "Kampagnen Feedback", "Follow ups", "Alle Leads", "Salesforce Abgleich", "CRM Ausschluss"],
@@ -1219,7 +1246,7 @@ if jobs_frame.empty and not frame.empty:
 
 if page == "Daily Leads":
     st.title("Daily Leads")
-    st.caption("Breite Massenkampagne über alle relevanten Berufsgruppen. Kleine und mittelständische Direktkunden werden weiterhin priorisiert.")
+    st.caption("Neue Firmen vor Salesforce finden, recherchieren und für eine kontrollierte Vertriebswelle vorbereiten.")
 
     research_pending = len(research_candidate_indices(frame, max(1, len(frame)))) if not frame.empty else 0
     ai_pending = len(ai_candidate_indices(frame, max(1, len(frame)))) if not frame.empty else 0
@@ -1250,15 +1277,25 @@ if page == "Daily Leads":
             key="campaign_v60",
             help="Der Scanner filtert nicht nur nach Beruf, sondern auch nach kleiner Unternehmensstruktur.",
         )
+        campaign_target = CAMPAIGN_TARGETS.get(campaign, 0)
+        campaign_count = int((frame.get("kampagne", pd.Series(index=frame.index, dtype=str)) == campaign).sum()) if not frame.empty else 0
+        if campaign_target:
+            target_ratio = min(1.0, campaign_count / campaign_target)
+            st.progress(target_ratio, text=f"Wellenziel: {campaign_count} von {campaign_target} neuen Firmen vorbereitet")
+            st.caption(
+                "Diese Welle priorisiert kleine Physio, Ergo und Logopädie Praxen mit aktuellem Personalbedarf. "
+                "Die Suche pausiert automatisch, sobald das Ziel erreicht ist."
+            )
         terms_text = st.text_area(
             "Suchbegriffe, eine Zeile je Begriff",
             "\n".join(CAMPAIGN_PRESETS[campaign]),
             key=f"terms_v60_{campaign}",
         )
+        campaign_regions = CAMPAIGN_REGIONS.get(campaign, DEFAULT_REGIONS)
         regions_text = st.text_area(
             "Regionen im Format Ort,Umkreis",
-            "\n".join(f"{city},{radius}" for city, radius in DEFAULT_REGIONS),
-            key="regions_v4",
+            "\n".join(f"{city},{radius}" for city, radius in campaign_regions),
+            key=f"regions_v60_{campaign}",
         )
 
         source_columns = st.columns(4)
@@ -1278,11 +1315,20 @@ if page == "Daily Leads":
             key="career_urls_v4",
         )
 
+        is_testpilot_wave = campaign == "Testpilot Therapie 500"
         settings_columns = st.columns(4)
-        days = settings_columns[0].number_input("Veröffentlicht seit Tagen", 1, 30, 14, key="days_v8")
-        max_pages = settings_columns[1].number_input("Seiten je Suche", 1, 3, 1, key="pages_v8")
-        task_batch_size = settings_columns[2].number_input("Suchaufgaben pro Klick", 1, 12, 4, key="task_batch_v8")
-        region_batch_size = settings_columns[3].number_input("Regionen je Suchaufgabe", 1, 6, 3, key="region_batch_v8")
+        days = settings_columns[0].number_input(
+            "Veröffentlicht seit Tagen", 1, 30, 14, key=f"days_v10_{campaign}"
+        )
+        max_pages = settings_columns[1].number_input(
+            "Seiten je Suche", 1, 5, 2 if is_testpilot_wave else 1, key=f"pages_v10_{campaign}"
+        )
+        task_batch_size = settings_columns[2].number_input(
+            "Suchaufgaben pro Klick", 1, 30, 12 if is_testpilot_wave else 4, key=f"task_batch_v10_{campaign}"
+        )
+        region_batch_size = settings_columns[3].number_input(
+            "Regionen je Suchaufgabe", 1, 8, 4 if is_testpilot_wave else 3, key=f"region_batch_v10_{campaign}"
+        )
 
         all_terms = [line.strip() for line in terms_text.splitlines() if line.strip()]
         try:
@@ -1395,6 +1441,11 @@ if page == "Daily Leads":
             completed_terms: list[str] = []
 
             for position, (term, task_regions) in enumerate(tasks_to_run, start=1):
+                if campaign_target:
+                    current_campaign_count = int((frame["kampagne"] == campaign).sum()) if not frame.empty else 0
+                    if current_campaign_count >= campaign_target:
+                        details.append(f"Wellenziel von {campaign_target} Firmen erreicht. Suche automatisch pausiert.")
+                        break
                 region_names = ", ".join(city for city, _ in task_regions)
                 task_marker = _scan_task_marker(campaign, term, task_regions)
                 progress.progress(
@@ -1722,20 +1773,24 @@ if page == "Daily Leads":
         else:
             display_frame = open_frame.copy()
 
-        filter_cols = st.columns([2, 2, 3])
+        filter_cols = st.columns([2, 2, 2, 3])
+        lead_campaigns = ["Alle Kampagnen"] + sorted([x for x in display_frame["kampagne"].dropna().astype(str).unique().tolist() if x])
+        selected_campaign = filter_cols[0].selectbox("Kampagne", lead_campaigns, key="lead_campaign_filter_v10")
         segments = ["Alle Segmente"] + sorted([x for x in display_frame["lead_segment"].dropna().astype(str).unique().tolist() if x])
-        selected_segment = filter_cols[0].selectbox("Segment", segments, key="segment_filter_v10")
-        contact_filter = filter_cols[1].selectbox(
+        selected_segment = filter_cols[1].selectbox("Segment", segments, key="segment_filter_v10")
+        contact_filter = filter_cols[2].selectbox(
             "Kontaktstatus",
             ["Alle", "E Mail vorhanden", "Direkte oder Recruiting Mail", "Recherche offen"],
             key="contact_filter_v10",
         )
-        search_text = filter_cols[2].text_input(
+        search_text = filter_cols[3].text_input(
             "Firma oder Position suchen",
             placeholder="zum Beispiel Architekt, Ingenieur, Steuer oder IT",
             key="lead_search_v10",
         ).strip().lower()
 
+        if selected_campaign != "Alle Kampagnen":
+            display_frame = display_frame[display_frame["kampagne"] == selected_campaign].copy()
         if selected_segment != "Alle Segmente":
             display_frame = display_frame[display_frame["lead_segment"] == selected_segment].copy()
         if contact_filter == "E Mail vorhanden":
@@ -1781,7 +1836,7 @@ if page == "Daily Leads":
                 header_columns[2].metric("Qualität", int(float(row["quality_score"] or 0)))
                 header_columns[3].write(row["quality_status"] or "Nicht freigeben")
 
-                st.write(f"**Segment:** {row['lead_segment'] or 'Direktkunde'} · **Größenfit:** {row['size_fit'] or 'offen'}")
+                st.write(f"**Kampagne:** {row['kampagne'] or 'nicht zugeordnet'} · **Segment:** {row['lead_segment'] or 'Direktkunde'} · **Größenfit:** {row['size_fit'] or 'offen'}")
                 st.write(f"**Stellenschwerpunkte:** {row['offene_stellen']}")
                 st.write(f"**Warum interessant:** {row['warum_hot'] or 'noch keine belastbare Begründung'}")
                 if row["personalization_evidence"]:
