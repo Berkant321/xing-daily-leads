@@ -11,10 +11,13 @@ import pandas as pd
 from bs4 import BeautifulSoup
 
 from research import normalize_company as research_normalize_company
+from research import root_domain
 from research import research_company
 from sales_ai import ASSET_KEYS, create_sales_assets
 
-PIPELINE_SCHEMA_VERSION = "10.0.0"
+PIPELINE_SCHEMA_VERSION = "10.4.0"
+MONDAY_WAVE_CAMPAIGN = "Montagswelle 500 | Testpilot Fachkräfte"
+TESTPILOT_THERAPY_CAMPAIGN = "Testpilot Therapie 500"
 
 
 BENEFIT_PATTERNS = {
@@ -296,16 +299,19 @@ def evaluate_lead_quality(row: dict[str, Any]) -> tuple[int, str, str]:
     else:
         gaps.append("Betreff weicht ab")
 
-    if clean_text(row.get("kampagne", "")) == "Testpilot Therapie 500":
+    campaign = clean_text(row.get("kampagne", ""))
+    if campaign in {TESTPILOT_THERAPY_CAMPAIGN, MONDAY_WAVE_CAMPAIGN}:
         required = [
-            "Testpilot",
             "zwei Monate",
             "zwölf Monate",
             "Stellenanzeige",
             "TalentManager",
             "direkt ansprechen",
-            "Position noch offen",
         ]
+        if campaign == TESTPILOT_THERAPY_CAMPAIGN:
+            required.append("Position noch offen")
+        else:
+            required.append("Klingt")
     else:
         required = [
             "XING Kampagne",
@@ -336,13 +342,29 @@ def evaluate_lead_quality(row: dict[str, Any]) -> tuple[int, str, str]:
         score += 2
 
     score = max(0, min(100, int(score)))
+    role_text = clean_text(row.get("rolle", "")).lower()
+    owner_or_hr = any(token in role_text for token in (
+        "geschäftsführer", "geschäftsführung", "inhaber", "praxis", "kanzlei",
+        "personal", "recruit", "human resources", "people", "hr ", "leitung", "partner",
+    ))
+    email_domain = email.rsplit("@", 1)[-1].lower() if "@" in email else ""
+    website_domain = root_domain(clean_text(row.get("website", ""))).lower() if clean_text(row.get("website", "")) else ""
+    generic_on_official_domain = bool(
+        email_label == "Allgemein"
+        and clean_text(row.get("ansprechpartner", ""))
+        and owner_or_hr
+        and email_domain
+        and website_domain
+        and (email_domain == website_domain or email_domain.endswith("." + website_domain))
+    )
     hard_ready = bool(
         mail
         and job_titles
         and evidence
-        and email_label in {"Direkt", "Recruiting"}
+        and (email_label in {"Direkt", "Recruiting"} or generic_on_official_domain)
         and subject == exact_subject
         and found == len(required)
+        and clean_text(row.get("crm_status", "")) != "Bereits in Salesforce"
     )
     if score >= 85 and hard_ready:
         status = "Versandbereit"
@@ -352,6 +374,43 @@ def evaluate_lead_quality(row: dict[str, Any]) -> tuple[int, str, str]:
         status = "Nicht freigeben"
     notes = "; ".join((strengths[:5] + ["Offen: " + ", ".join(gaps[:5]) if gaps else ""]))
     return score, status, notes.strip("; ")
+
+
+def strict_send_ready_mask(frame: pd.DataFrame | None) -> pd.Series:
+    """Harter Versandfilter für die 500er Welle.
+
+    Rohfunde zählen nie. Ein Account zählt erst, wenn Recherche, Kontakt,
+    individuelles Mailing und Salesforce Abgleich vollständig bestanden sind.
+    """
+    result = migrate_frame(frame)
+    if result.empty:
+        return pd.Series(False, index=result.index, dtype=bool)
+    score = pd.to_numeric(result["small_business_score"], errors="coerce").fillna(0)
+    campaign = result["kampagne"].astype(str)
+    current_evidence = (
+        (result["veroeffentlicht_am"].astype(str).str.strip() != "")
+        | (result["karriereseite"].astype(str).str.strip() != "")
+        | (result["stellenlink"].astype(str).str.strip() != "")
+    )
+    return (
+        (campaign == MONDAY_WAVE_CAMPAIGN)
+        & (result["quality_status"] == "Versandbereit")
+        & (result["crm_status"] != "Bereits in Salesforce")
+        & (~result["status"].isin(["Ausschließen", "In Salesforce übernommen"]))
+        & (result["size_fit"] != "Groß oder unpassend")
+        & (score >= 55)
+        & (result["website"].astype(str).str.strip() != "")
+        & (result["email"].astype(str).str.strip() != "")
+        & (result["erstmail"].astype(str).str.strip() != "")
+        & (result["personalization_evidence"].astype(str).str.strip() != "")
+        & current_evidence
+    )
+
+
+def is_strict_send_ready(row: dict[str, Any]) -> bool:
+    frame = migrate_frame(pd.DataFrame([row]))
+    mask = strict_send_ready_mask(frame)
+    return bool(mask.iloc[0]) if len(mask) else False
 
 
 def refresh_quality(frame: pd.DataFrame | None) -> tuple[pd.DataFrame, bool]:
@@ -740,14 +799,14 @@ CRM_GENERIC_TOKENS = {
     "services", "service", "solutions", "solution", "company", "unternehmen",
 }
 
+CRM_GENERIC_DOMAINS = {
+    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "gmx.de", "gmx.net",
+    "web.de", "icloud.com", "yahoo.com", "yahoo.de", "t-online.de",
+}
+
 
 def company_match_keys(company: str) -> set[str]:
-    """Erzeugt wenige sichere Alias Keys für den Salesforce Abgleich.
-
-    Kein globales Fuzzy Matching: dadurch bleibt der Abgleich auch mit mehreren
-    hunderttausend Accounts schnell. Gleichzeitig werden typische Unterschiede
-    wie BWH Bücker Kunststoffe vs. Bücker Kunststoffe abgefangen.
-    """
+    """Erzeugt sichere Alias Keys für den Salesforce Abgleich."""
     normalized = normalize_company(company)
     if not normalized:
         return set()
@@ -758,9 +817,6 @@ def company_match_keys(company: str) -> set[str]:
     if len(compact) >= 8:
         keys.add(compact)
 
-    # Kurze Konzern oder Gesellschaftspräfixe wie BWH, BKT, RC nicht zum
-    # Ausschlusskiller werden lassen. Nur anwenden, wenn danach mindestens
-    # zwei aussagekräftige Tokens übrig bleiben.
     if len(tokens) >= 3 and len(tokens[0]) <= 3:
         remainder = tokens[1:]
         if len(remainder) >= 2 and sum(len(t) for t in remainder) >= 8:
@@ -772,30 +828,83 @@ def company_match_keys(company: str) -> set[str]:
         keys.add(" ".join(core))
         keys.add("".join(core))
 
+    # Sichere Teilnamen nur bei mindestens zwei aussagekräftigen Tokens.
+    # Das fängt z. B. Markenpräfixe oder Standortzusätze ab, ohne Müller oder Schmidt global fuzzy zu matchen.
+    if len(core) >= 3:
+        for start in range(len(core) - 1):
+            pair = core[start:start + 2]
+            if sum(len(token) for token in pair) >= 12:
+                keys.add(" ".join(pair))
+                keys.add("".join(pair))
+
     return {key for key in keys if key}
+
+
+def _crm_domain(value: str) -> str:
+    text = clean_text(value).lower().strip()
+    if not text:
+        return ""
+    if "@" in text and "://" not in text:
+        text = text.rsplit("@", 1)[-1]
+    domain = root_domain(text) if "://" in text or "/" in text else text.split(":", 1)[0].strip(". ")
+    domain = domain.lower().removeprefix("www.")
+    if not domain or "." not in domain or domain in CRM_GENERIC_DOMAINS:
+        return ""
+    return domain
+
+
+def _crm_phone(value: str) -> str:
+    digits = re.sub(r"\D", "", clean_text(value))
+    if len(digits) < 8:
+        return ""
+    return digits[-10:]
 
 
 def expand_crm_exclusions(companies) -> set[str]:
     result: set[str] = set()
     for company in companies:
-        result.update(company_match_keys(str(company)))
+        value = clean_text(company)
+        if not value:
+            continue
+        if value.startswith("@domain:") or value.startswith("@phone:"):
+            result.add(value.lower())
+            continue
+        result.update(company_match_keys(value))
     return result
 
 
-def crm_match(company: str, exclusions: set[str]) -> bool:
-    """Schneller Salesforce Abgleich mit sicheren Alias Keys.
-
-    Die Prüfung bleibt ein Mengenabgleich und skaliert daher auch mit einer sehr
-    großen Ausschlussliste. Fuzzy Vergleiche über die komplette Datenbank werden
-    bewusst vermieden.
-    """
-    return bool(company_match_keys(company) & exclusions)
+def crm_match(
+    company: str,
+    exclusions: set[str],
+    *,
+    website: str = "",
+    email: str = "",
+    phone: str = "",
+) -> bool:
+    """Salesforce Abgleich über Firmenalias plus, nach Recherche, Domain und Telefon."""
+    candidate_keys = company_match_keys(company)
+    if candidate_keys & exclusions:
+        return True
+    domains = {_crm_domain(website), _crm_domain(email)} - {""}
+    if any(f"@domain:{domain}" in exclusions for domain in domains):
+        return True
+    phone_key = _crm_phone(phone)
+    if phone_key and f"@phone:{phone_key}" in exclusions:
+        return True
+    return False
 
 
 def apply_crm_status(frame: pd.DataFrame, exclusions: set[str]) -> pd.DataFrame:
     frame = migrate_frame(frame)
-    frame["crm_status"] = frame["firma"].map(
-        lambda company: "Bereits in Salesforce" if crm_match(company, exclusions) else "Neu"
+    frame["crm_status"] = frame.apply(
+        lambda row: "Bereits in Salesforce" if crm_match(
+            row.get("firma", ""),
+            exclusions,
+            website=row.get("website", ""),
+            email=row.get("email", ""),
+            phone=row.get("telefon", ""),
+        ) else "Neu",
+        axis=1,
     )
     return frame
 
@@ -960,6 +1069,8 @@ def build_discovery_leads(
         broad_campaign = focus in {"Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden"}
         if focus == "Chancenmix Architektur Ingenieurwesen Steuer IT":
             max_jobs = 15
+        elif focus == MONDAY_WAVE_CAMPAIGN:
+            max_jobs = 8
         else:
             max_jobs = 25 if broad_campaign else 8
         if size_fit == "Groß oder unpassend" or len(jobs) > max_jobs:
@@ -1041,7 +1152,7 @@ def build_discovery_leads(
             "quality_status": "Nicht freigeben",
             "quality_notes": "Recherche und individuelle Texte fehlen",
             "content_hash": facts_hash(company, jobs, benefits, direct_research),
-            "crm_status": "Neu / nicht abgeglichen",
+            "crm_status": "Neu",
             "status": old.get("status", "Neu") if old else "Neu",
             "wiedervorlage": old.get("wiedervorlage", "") if old else (date.today() + timedelta(days=1)).isoformat(),
             "notiz": old.get("notiz", "") if old else "",
@@ -1145,6 +1256,7 @@ def research_candidate_indices(frame: pd.DataFrame, limit: int) -> list[int]:
         needs
         & (attempts < 3)
         & (~frame["status"].isin(["Ausschließen", "In Salesforce übernommen"]))
+        & (frame["crm_status"] != "Bereits in Salesforce")
         & (frame["size_fit"] != "Groß oder unpassend")
     ].copy()
     if candidates.empty:
@@ -1279,7 +1391,16 @@ def ai_candidate_indices(frame: pd.DataFrame, limit: int, force: bool = False) -
         needs
         & (attempts < 3)
         & (~frame["status"].isin(["Ausschließen", "In Salesforce übernommen"]))
+        & (frame["crm_status"] != "Bereits in Salesforce")
         & (frame["size_fit"] != "Groß oder unpassend")
+        & (
+            (frame["kampagne"] != MONDAY_WAVE_CAMPAIGN)
+            | (
+                (frame["research_status"].isin(["gefunden", "abgeschlossen", "teilweise", "vollständig"]))
+                & (frame["website"] != "")
+                & (frame["email"] != "")
+            )
+        )
     ].copy()
     if candidates.empty:
         return []

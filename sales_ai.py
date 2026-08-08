@@ -36,14 +36,22 @@ REQUIRED_MAIL_PHRASES = (
 )
 
 TESTPILOT_CAMPAIGN = "Testpilot Therapie 500"
+MONDAY_WAVE_CAMPAIGN = "Montagswelle 500 | Testpilot Fachkräfte"
 TESTPILOT_REQUIRED_PHRASES = (
-    "Testpilot",
     "zwei Monate",
     "zwölf Monate",
     "Stellenanzeige",
     "TalentManager",
     "direkt ansprechen",
     "Position noch offen",
+)
+MONDAY_REQUIRED_PHRASES = (
+    "zwei Monate",
+    "zwölf Monate",
+    "Stellenanzeige",
+    "TalentManager",
+    "direkt ansprechen",
+    "Klingt",
 )
 
 
@@ -365,6 +373,117 @@ Berkant Devrim"""
         result[key] = _no_customer_hyphens(_clean_multiline(result[key]))
     return result
 
+def _monday_assets(
+    company: str,
+    jobs: list[dict],
+    benefits: list[str],
+    person: str,
+    research: dict[str, Any],
+) -> dict[str, str]:
+    titles = _job_titles(jobs)
+    title_phrase = _natural_join(titles, limit=3)
+    title_one = titles[0] if titles else "Ihre offene Position"
+    family = _job_family(titles)
+    salutation = _salutation(person)
+    usable = [_clean_single(value) for value in benefits if _clean_single(value)]
+
+    if len(usable) >= 2:
+        benefit_phrases = {
+            "Homeoffice": "Homeoffice",
+            "Flexible Arbeitszeiten": "flexiblen Arbeitszeiten",
+            "4 Tage Woche": "einer 4 Tage Woche",
+            "30 oder mehr Tage Urlaub": "30 oder mehr Tagen Urlaub",
+            "JobRad": "JobRad",
+            "Jobticket": "Jobticket",
+            "Weiterbildung": "Weiterbildungsmöglichkeiten",
+            "Betriebliche Altersvorsorge": "betrieblicher Altersvorsorge",
+            "Bonus oder Prämien": "zusätzlichen Bonusmöglichkeiten",
+            "Keine Wochenendarbeit": "Arbeitszeiten ohne Wochenendarbeit",
+            "Keine Überstunden": "verlässlichen Arbeitszeiten",
+            "Unbefristet": "unbefristeten Verträgen",
+            "Digitale Arbeitsweise": "einer digitalen Arbeitsweise",
+            "Familiäres Team": "einem familiären Team",
+        }
+        shown = _natural_join([benefit_phrases.get(x, x) for x in usable], limit=2)
+        intro = (
+            f"Sie suchen aktuell {title_phrase}. Mit {shown} bieten Sie als Arbeitgeber bereits deutlich mehr "
+            "als nur den klassischen Obstkorb."
+        )
+        evidence = "erkannte Benefits: " + ", ".join(usable[:2])
+    else:
+        intro = (
+            f"Sie suchen aktuell {title_phrase}. Gerade bei {family} würde ich mich nicht darauf verlassen, "
+            "dass die passenden Fachkräfte selbst aktiv nach einer neuen Stelle suchen."
+        )
+        evidence = f"aktuelle Suche: {title_phrase}"
+
+    mail = f"""{salutation}
+
+{intro}
+
+Genau deshalb möchte ich Sie zu unserer aktuellen XING Testkampagne einladen. Statt sich direkt für zwölf Monate festzulegen, können Sie eine XING Stellenanzeige und den TalentManager zwei Monate im eigenen Recruiting testen.
+
+Die Stellenanzeige bringt Sichtbarkeit und Bewerbungen. Parallel können Sie passende und wechselwillige Fachkräfte selbst finden und direkt ansprechen. So warten Sie nicht nur darauf, wer sich bewirbt, sondern entscheiden selbst, wen Sie kennenlernen möchten.
+
+Klingt das für Ihre aktuelle Suche spannend?
+
+Beste Grüße aus Münster
+Berkant Devrim"""
+
+    opener = (
+        f"Guten Tag, Berkant Devrim von XING. Ich komme direkt zum Punkt. Bei {company} suchen Sie aktuell {title_phrase}. "
+        "Wir haben gerade eine Testmöglichkeit, bei der Sie Stellenanzeige und TalentManager zwei Monate statt direkt zwölf Monate nutzen können. "
+        "Wie läuft die Suche aktuell und wo fehlt Ihnen noch die passende Resonanz?"
+    )
+    discovery = "\n".join([
+        "1. Welche Position hat aktuell die höchste Priorität?",
+        "2. Seit wann suchen Sie dafür?",
+        "3. Wie viele fachlich passende Bewerbungen kommen aktuell tatsächlich an?",
+        "4. Welche Kanäle funktionieren bei Ihnen heute am besten?",
+        "5. Wo verlieren Sie im aktuellen Recruitingprozess die meisten passenden Kandidaten?",
+        "6. Welche Auswirkung hat die offene Stelle auf Team, Auslastung oder Wachstum?",
+        "7. Welche weiteren Einstellungen planen Sie in den kommenden zwölf Monaten?",
+        "8. Was müsste ein zweimonatiger Test zeigen, damit Sie ihn als erfolgreich bewerten?",
+    ])
+    challenger = (
+        "Eine klassische Anzeige erreicht vor allem aktiv Suchende. Der größere Hebel liegt häufig bei passenden Fachkräften, "
+        "die beschäftigt sind, aber für einen guten Wechsel offen wären. Der Testlauf verbindet beide Wege, ohne direkt zwölf Monate festzulegen."
+    )
+    follow1 = f"""{salutation}
+
+ich greife meine Einladung für {company} noch einmal kurz auf.
+
+Statt direkt zwölf Monate festzulegen, können Sie Stellenanzeige und TalentManager zwei Monate testen und dabei Bewerbungen mit der direkten Ansprache wechselwilliger Fachkräfte verbinden.
+
+Ist {title_one} weiterhin offen?
+
+Beste Grüße aus Münster
+Berkant Devrim"""
+    follow2 = f"""{salutation}
+
+falls {title_one} inzwischen besetzt ist, hake ich das Thema gerne ab.
+
+Falls die Suche noch läuft, können wir kurz prüfen, ob der zweimonatige Testlauf für {company} sinnvoll ist.
+
+Beste Grüße aus Münster
+Berkant Devrim"""
+    result = {
+        "erstmail_betreff": f"Exklusive Einladung | {company}",
+        "erstmail": mail,
+        "call_opener": opener,
+        "discovery_fragen": discovery,
+        "challenger_reframe": challenger,
+        "follow_up_1": follow1,
+        "follow_up_2": follow2,
+        "personalization_evidence": evidence,
+        "mail_variant": "Montagswelle Testpilot V1",
+        "ai_status": "Fallback genutzt",
+    }
+    for key in ASSET_KEYS:
+        result[key] = _no_customer_hyphens(_clean_multiline(result[key]))
+    return result
+
+
 def _extract_json_object(raw: str) -> dict[str, Any]:
     raw = str(raw or "").strip()
     if raw.startswith("```"):
@@ -399,7 +518,12 @@ def _valid_campaign_mail(mail: str, company: str, campaign: str = "") -> bool:
         return False
     if company.lower() not in text.lower():
         return False
-    required = TESTPILOT_REQUIRED_PHRASES if campaign == TESTPILOT_CAMPAIGN else REQUIRED_MAIL_PHRASES
+    if campaign == TESTPILOT_CAMPAIGN:
+        required = TESTPILOT_REQUIRED_PHRASES
+    elif campaign == MONDAY_WAVE_CAMPAIGN:
+        required = MONDAY_REQUIRED_PHRASES
+    else:
+        required = REQUIRED_MAIL_PHRASES
     return all(phrase.lower() in text.lower() for phrase in required)
 
 
@@ -415,11 +539,12 @@ def create_sales_assets(
     campaign: str = "",
 ) -> dict[str, str]:
     research = research or {}
-    fallback = (
-        _testpilot_assets(company, jobs, benefits, person, research)
-        if campaign == TESTPILOT_CAMPAIGN
-        else _fallback_assets(company, jobs, benefits, person, research)
-    )
+    if campaign == TESTPILOT_CAMPAIGN:
+        fallback = _testpilot_assets(company, jobs, benefits, person, research)
+    elif campaign == MONDAY_WAVE_CAMPAIGN:
+        fallback = _monday_assets(company, jobs, benefits, person, research)
+    else:
+        fallback = _fallback_assets(company, jobs, benefits, person, research)
     if OpenAI is None:
         fallback["ai_status"] = "Fallback: OpenAI Paket fehlt"
         return fallback
@@ -441,7 +566,20 @@ def create_sales_assets(
     website_text = _clean_single(research.get("text", ""))[:12000]
     exact_subject = f"Exklusive Einladung | {company}"
     deterministic_variant = int(hashlib.sha1(company.encode("utf-8")).hexdigest()[:2], 16) % 2 + 1
-    if campaign == TESTPILOT_CAMPAIGN:
+    if campaign == MONDAY_WAVE_CAMPAIGN:
+        campaign_rules = """
+Spezielle Kampagne Montagswelle 500:
+4. Schreibe wie ein echter Account Executive, nicht wie ein Marketing Bot. Kurze klare Sätze. Keine Floskeln wie ich habe mir Ihre Website angesehen.
+5. Wenn mindestens zwei Benefits belegt sind, darf sinngemäß der leicht freche Gedanke vorkommen: Sie bieten mehr als nur den klassischen Obstkorb. Sonst nicht erfinden.
+6. Lade zur aktuellen XING Testkampagne ein. Statt direkt zwölf Monate festzulegen, können Stellenanzeige und TalentManager zwei Monate getestet werden.
+7. Die Stellenanzeige bringt Sichtbarkeit und Bewerbungen. Der TalentManager ermöglicht die gezielte Auswahl und direkte Ansprache passender und wechselwilliger Fachkräfte.
+8. Der Kern lautet sinngemäß: Nicht nur warten, wer sich bewirbt, sondern selbst entscheiden, wen man kennenlernen möchte.
+9. Abschluss sehr kurz: Klingt das für Ihre aktuelle Suche spannend?
+10. Keine Preise und keine Rabatte nennen.
+11. Die Erstmail umfasst 90 bis 145 Wörter.
+"""
+        mail_variant_name = f"Montagswelle Testpilot V{deterministic_variant}"
+    elif campaign == TESTPILOT_CAMPAIGN:
         campaign_rules = """
 Spezielle Kampagne Testpilot Therapie:
 4. Ein eigener Absatz lädt das Unternehmen als Testpilot zur aktuellen XING Kampagne ein.

@@ -155,7 +155,7 @@ Enthalten sind:
 
 Empfohlener Ablauf: Zuerst 30 bis 50 Firmen vollständig durch Suche, Recherche und Textgenerierung laufen lassen. Qualität und Rückmeldungen prüfen. Danach die Welle schrittweise bis 500 ausbauen.
 
-## V10.3 Strict Filter
+## V10.4 Strict Filter
 
 Der Lead Filter wurde grundlegend verschärft.
 

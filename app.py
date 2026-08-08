@@ -32,6 +32,7 @@ from pipeline import (
     normalize_company,
     research_candidate_indices,
     refresh_quality,
+    strict_send_ready_mask,
     upsert_jobs,
     upsert_leads,
 )
@@ -55,6 +56,18 @@ st.set_page_config(
 
 
 CAMPAIGN_PRESETS = {
+    "Montagswelle 500 | Testpilot Fachkräfte": [
+        # Engpass plus erreichbare Entscheider: Therapie, Pflege, Handwerk, Technik,
+        # Engineering, Steuer und Logistik. Keine beliebige Massenliste.
+        "Physiotherapeut", "Ergotherapeut", "Logopäde",
+        "Pflegefachkraft ambulant", "Medizinische Fachangestellte", "Zahnmedizinische Fachangestellte",
+        "Elektroniker", "Anlagenmechaniker SHK", "Mechatroniker", "Kältetechniker",
+        "Dachdecker", "Servicetechniker", "Landmaschinenmechatroniker",
+        "Bauleiter", "Projektingenieur", "TGA Planer", "Bauzeichner",
+        "Steuerfachangestellte", "Steuerfachwirt", "Bilanzbuchhalter", "Lohnbuchhalter",
+        "Fachkraft für Lagerlogistik", "Berufskraftfahrer", "Disponent",
+        "Industriemechaniker", "Zerspanungsmechaniker", "CNC Fräser",
+    ],
     "Testpilot Therapie 500": [
         "Physiotherapeut", "Physiotherapeutin", "Physiotherapie",
         "Ergotherapeut", "Ergotherapeutin", "Ergotherapie",
@@ -166,6 +179,17 @@ DEFAULT_REGIONS = [
     ("Berlin", 200),
 ]
 
+MONDAY_WAVE_REGIONS = [
+    ("Hamburg", 120), ("Kiel", 100), ("Lübeck", 90), ("Bremen", 110),
+    ("Hannover", 110), ("Osnabrück", 100), ("Münster", 100), ("Bielefeld", 100),
+    ("Dortmund", 90), ("Essen", 85), ("Düsseldorf", 85), ("Köln", 90),
+    ("Aachen", 90), ("Koblenz", 100), ("Frankfurt am Main", 100), ("Mannheim", 90),
+    ("Saarbrücken", 100), ("Karlsruhe", 90), ("Stuttgart", 100), ("Freiburg im Breisgau", 100),
+    ("Nürnberg", 105), ("Würzburg", 100), ("Regensburg", 100), ("München", 115),
+    ("Augsburg", 90), ("Erfurt", 105), ("Leipzig", 105), ("Dresden", 105),
+    ("Magdeburg", 110), ("Berlin", 120), ("Potsdam", 90), ("Rostock", 120),
+]
+
 TESTPILOT_THERAPY_REGIONS = [
     ("Hamburg", 120), ("Bremen", 100), ("Hannover", 110), ("Kiel", 100),
     ("Rostock", 120), ("Berlin", 130), ("Potsdam", 90), ("Magdeburg", 110),
@@ -177,12 +201,45 @@ TESTPILOT_THERAPY_REGIONS = [
 ]
 
 CAMPAIGN_REGIONS = {
+    "Montagswelle 500 | Testpilot Fachkräfte": MONDAY_WAVE_REGIONS,
     "Testpilot Therapie 500": TESTPILOT_THERAPY_REGIONS,
 }
 
 CAMPAIGN_TARGETS = {
+    "Montagswelle 500 | Testpilot Fachkräfte": 500,
     "Testpilot Therapie 500": 500,
 }
+
+MONDAY_SEGMENT_QUOTAS = {
+    "Therapiepraxis": 110,
+    "Handwerk und Technik": 110,
+    "Pflege und Medizin": 80,
+    "Steuer und Buchhaltung": 70,
+    "Bau und Engineering": 55,
+    "Industrie und Produktion": 45,
+    "Logistik und Einkauf": 30,
+}
+
+def balanced_monday_ready(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return migrate_frame(pd.DataFrame())
+    work = migrate_frame(frame)
+    work = work[strict_send_ready_mask(work)].copy()
+    if work.empty:
+        return work
+    work["quality_num"] = pd.to_numeric(work["quality_score"], errors="coerce").fillna(0)
+    work["lead_num"] = pd.to_numeric(work["lead_score"], errors="coerce").fillna(0)
+    selected = []
+    for segment, quota in MONDAY_SEGMENT_QUOTAS.items():
+        chunk = work[work["lead_segment"] == segment].sort_values(
+            ["quality_num", "lead_num", "firma"], ascending=[False, False, True]
+        ).head(quota)
+        if not chunk.empty:
+            selected.append(chunk)
+    if not selected:
+        return work.iloc[0:0].drop(columns=["quality_num", "lead_num"], errors="ignore")
+    result = pd.concat(selected, ignore_index=True)
+    return result.drop(columns=["quality_num", "lead_num"], errors="ignore")
 
 
 def _secret_text(name: str, default: str = "") -> str:
@@ -208,7 +265,7 @@ def _google_config_signature() -> str:
         client_email,
     ])
 
-KMU_SCHEMA_VERSION = "10.0.0"
+KMU_SCHEMA_VERSION = "10.4.0"
 
 
 def exclusive_invitation_subject(company: Any) -> str:
@@ -956,7 +1013,50 @@ def append_log(**kwargs) -> None:
     st.session_state["xing_logs_cache"] = logs
 
 
+def _find_column(frame: pd.DataFrame, aliases: list[str]) -> str | None:
+    normalized_columns = {normalize_company(column): column for column in frame.columns}
+    return next(
+        (
+            original
+            for normalized, original in normalized_columns.items()
+            if any(alias in normalized for alias in aliases)
+        ),
+        None,
+    )
+
+
+def _crm_domain(value: str) -> str:
+    text = clean_text(value).lower().strip()
+    if not text:
+        return ""
+    if "@" in text and "://" not in text:
+        text = text.rsplit("@", 1)[-1]
+    text = re.sub(r"^https?://", "", text)
+    text = text.split("/", 1)[0].split(":", 1)[0].strip(". ")
+    text = text[4:] if text.startswith("www.") else text
+    generic = {
+        "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "gmx.de",
+        "gmx.net", "web.de", "icloud.com", "yahoo.com", "yahoo.de", "t-online.de",
+    }
+    if "." not in text or text in generic:
+        return ""
+    return text
+
+
+def _crm_phone(value: str) -> str:
+    digits = re.sub(r"\D", "", clean_text(value))
+    if len(digits) < 8:
+        return ""
+    return digits[-10:]
+
+
 def read_company_file(uploaded_file):
+    """Liest einen Salesforce Export als Identitätsindex.
+
+    Neben Account Name werden, falls vorhanden, Website, E Mail und Telefon
+    berücksichtigt. Das reduziert Treffer, bei denen derselbe Account in einer
+    Jobbörse unter einer leicht anderen Schreibweise auftaucht.
+    """
     name = uploaded_file.name.lower()
     if name.endswith(".xlsx"):
         frame = pd.read_excel(uploaded_file, dtype=str).fillna("")
@@ -978,25 +1078,47 @@ def read_company_file(uploaded_file):
         if frame is None:
             raise ValueError("CSV konnte nicht gelesen werden.")
 
-    aliases = [
+    company_column = _find_column(frame, [
         "account name", "account", "firmenname", "firma", "unternehmen",
         "company", "name des accounts", "kunde", "kundenname",
-    ]
-    normalized_columns = {normalize_company(column): column for column in frame.columns}
-    company_column = next(
-        (
-            original
-            for normalized, original in normalized_columns.items()
-            if any(alias in normalized for alias in aliases)
-        ),
-        None,
-    )
+    ])
     if not company_column:
         raise ValueError("Keine Firmenspalte erkannt. Nutze zum Beispiel Account Name, Firma oder Unternehmen.")
-    companies = expand_crm_exclusions(
+
+    website_column = _find_column(frame, ["website", "webseite", "homepage", "domain", "internet"])
+    email_column = _find_column(frame, ["e mail", "email", "mail adresse", "email adresse"])
+    phone_column = _find_column(frame, ["telefon", "phone", "telefonnummer", "zentrale"])
+
+    identities = expand_crm_exclusions(
         value for value in frame[company_column].astype(str) if normalize_company(value)
     )
-    return companies, company_column, len(frame)
+    if website_column:
+        identities.update(
+            f"@domain:{domain}"
+            for domain in (_crm_domain(value) for value in frame[website_column].astype(str))
+            if domain
+        )
+    if email_column:
+        identities.update(
+            f"@domain:{domain}"
+            for domain in (_crm_domain(value) for value in frame[email_column].astype(str))
+            if domain
+        )
+    if phone_column:
+        identities.update(
+            f"@phone:{phone}"
+            for phone in (_crm_phone(value) for value in frame[phone_column].astype(str))
+            if phone
+        )
+
+    detected = [f"Firma: {company_column}"]
+    if website_column:
+        detected.append(f"Website: {website_column}")
+    if email_column:
+        detected.append(f"E Mail: {email_column}")
+    if phone_column:
+        detected.append(f"Telefon: {phone_column}")
+    return identities, " | ".join(detected), len(frame)
 
 
 def parse_regions(text: str) -> list[tuple[str, int]]:
@@ -1214,6 +1336,11 @@ frame, subject_changed = ensure_exclusive_subjects(frame)
 frame, quality_changed = refresh_quality(frame)
 exclusions = set(st.session_state["xing_exclusions_cache"])
 CRM_MINIMUM_FOR_SCAN = 1000
+CRM_MINIMUM_FOR_MONDAY = 1000
+if "monday_crm_loaded" not in st.session_state:
+    st.session_state["monday_crm_loaded"] = False
+if "monday_crm_rows" not in st.session_state:
+    st.session_state["monday_crm_rows"] = 0
 logs = st.session_state["xing_logs_cache"].copy()
 
 if not frame.empty:
@@ -1273,14 +1400,33 @@ if page == "Daily Leads":
             help="Der Scanner filtert nicht nur nach Beruf, sondern auch nach kleiner Unternehmensstruktur.",
         )
         campaign_target = CAMPAIGN_TARGETS.get(campaign, 0)
-        campaign_count = int((frame.get("kampagne", pd.Series(index=frame.index, dtype=str)) == campaign).sum()) if not frame.empty else 0
+        campaign_mask = (frame.get("kampagne", pd.Series(index=frame.index, dtype=str)) == campaign) if not frame.empty else pd.Series(dtype=bool)
+        campaign_count = int(campaign_mask.sum()) if not frame.empty else 0
+        if campaign == "Montagswelle 500 | Testpilot Fachkräfte" and not frame.empty:
+            monday_balanced = balanced_monday_ready(frame[campaign_mask].copy())
+            campaign_ready_count = len(monday_balanced)
+        else:
+            campaign_ready_count = campaign_count
         if campaign_target:
-            target_ratio = min(1.0, campaign_count / campaign_target)
-            st.progress(target_ratio, text=f"Wellenziel: {campaign_count} von {campaign_target} neuen Firmen vorbereitet")
-            st.caption(
-                "Diese Welle priorisiert kleine Physio, Ergo und Logopädie Praxen mit aktuellem Personalbedarf. "
-                "Die Suche pausiert automatisch, sobald das Ziel erreicht ist."
-            )
+            target_ratio = min(1.0, campaign_ready_count / campaign_target)
+            label = "versandbereiten, Salesforce sauberen Accounts" if campaign == "Montagswelle 500 | Testpilot Fachkräfte" else "neuen Firmen vorbereitet"
+            st.progress(target_ratio, text=f"Wellenziel: {campaign_ready_count} von {campaign_target} {label}")
+            if campaign == "Montagswelle 500 | Testpilot Fachkräfte":
+                st.caption(
+                    "Das Ziel zählt nur recherchierte Accounts mit aktueller Vakanz, nutzbarer E Mail, individueller Mail, "
+                    "KMU Fit und bestandenem Salesforce Abgleich. Rohfunde zählen ausdrücklich nicht."
+                )
+                quota_parts = []
+                monday_all_ready = frame[strict_send_ready_mask(frame) & campaign_mask].copy() if not frame.empty else frame.copy()
+                for segment, quota in MONDAY_SEGMENT_QUOTAS.items():
+                    have = int((monday_all_ready.get("lead_segment", pd.Series(dtype=str)) == segment).sum()) if not monday_all_ready.empty else 0
+                    quota_parts.append(f"{segment}: {min(have, quota)}/{quota}")
+                st.caption("Mix: " + " | ".join(quota_parts))
+            else:
+                st.caption(
+                    "Diese Welle priorisiert kleine Physio, Ergo und Logopädie Praxen mit aktuellem Personalbedarf. "
+                    "Die Suche pausiert automatisch, sobald das Ziel erreicht ist."
+                )
         terms_text = st.text_area(
             "Suchbegriffe, eine Zeile je Begriff",
             "\n".join(CAMPAIGN_PRESETS[campaign]),
@@ -1310,7 +1456,7 @@ if page == "Daily Leads":
             key="career_urls_v4",
         )
 
-        is_testpilot_wave = campaign == "Testpilot Therapie 500"
+        is_testpilot_wave = campaign in {"Testpilot Therapie 500", "Montagswelle 500 | Testpilot Fachkräfte"}
         settings_columns = st.columns(4)
         days = settings_columns[0].number_input(
             "Veröffentlicht seit Tagen", 1, 30, 14, key=f"days_v10_{campaign}"
@@ -1365,7 +1511,11 @@ if page == "Daily Leads":
         if uploaded is not None:
             try:
                 crm_companies, detected_column, row_count = read_company_file(uploaded)
-                st.info(f"Firmenspalte erkannt: {detected_column}. Zeilen: {row_count}.")
+                st.info(f"Salesforce Identitäten erkannt: {detected_column}. Zeilen: {row_count}.")
+                if campaign == "Montagswelle 500 | Testpilot Fachkräfte":
+                    st.session_state["monday_crm_loaded"] = True
+                    st.session_state["monday_crm_rows"] = int(row_count)
+                    st.success("Frischer Salesforce Export für diese Montagswelle erkannt.")
                 if st.button("CRM Firmen übernehmen", key="quick_crm_save_v4"):
                     try:
                         exclusions = persist_exclusions(set(exclusions) | crm_companies)
@@ -1381,6 +1531,20 @@ if page == "Daily Leads":
             except Exception:
                 st.error("Mindestens eine Region hat nicht das Format Ort,Umkreis.")
                 st.stop()
+
+            if campaign == "Montagswelle 500 | Testpilot Fachkräfte":
+                if not st.session_state.get("monday_crm_loaded", False):
+                    st.error(
+                        "Montagswelle Schutzschalter: Bitte in dieser Sitzung zuerst einen aktuellen Salesforce Export hochladen. "
+                        "Die Welle startet absichtlich nicht nur auf Basis einer alten Ausschlussliste."
+                    )
+                    st.stop()
+                if int(st.session_state.get("monday_crm_rows", 0) or 0) < CRM_MINIMUM_FOR_MONDAY:
+                    st.error(
+                        f"Der geladene Salesforce Export enthält nur {int(st.session_state.get('monday_crm_rows', 0) or 0):,} Zeilen. "
+                        "Für die 500er Welle bitte den vollständigen Account Export inklusive Pool und Bestandskunden verwenden."
+                    )
+                    st.stop()
 
             if len(exclusions) < CRM_MINIMUM_FOR_SCAN:
                 st.error(
@@ -1650,6 +1814,20 @@ if page == "Daily Leads":
                 company = frame.loc[index, "firma"]
                 progress.progress((position - 1) / max(1, len(indices)), text=f"Recherche {position} von {len(indices)}: {company}")
                 updated, diagnostics = enrich_lead(frame.loc[index].to_dict(), serpapi_key=serpapi_key)
+                if crm_match(
+                    updated.get("firma", ""),
+                    exclusions,
+                    website=updated.get("website", ""),
+                    email=updated.get("email", ""),
+                    phone=updated.get("telefon", ""),
+                ):
+                    updated["crm_status"] = "Bereits in Salesforce"
+                    updated["status"] = "Ausschließen"
+                    updated["quality_status"] = "Nicht freigeben"
+                    updated["quality_notes"] = "Nach Website oder Kontakt Recherche sicher im Salesforce Bestand erkannt"
+                    diagnostics.append(f"{company}: nach Recherche über Domain oder Telefon in Salesforce erkannt und automatisch ausgeschlossen")
+                else:
+                    updated["crm_status"] = "Neu"
                 for column in COLUMNS:
                     frame.loc[index, column] = updated.get(column, frame.loc[index, column])
                 persist_rows(frame.loc[[index]], frame)
@@ -1758,6 +1936,23 @@ if page == "Daily Leads":
             & (frame["erstmail"] != "")
         ].copy()
         open_frame = frame[base_open_mask].copy()
+
+        monday_ready = balanced_monday_ready(frame) if not frame.empty else frame.copy()
+        if not monday_ready.empty:
+            next_monday = date.today() + timedelta(days=(7 - date.today().weekday()) % 7 or 7)
+            monday_export = monday_ready[[
+                "firma", "ansprechpartner", "rolle", "email", "telefon", "website",
+                "job_titles", "orte", "erstmail_betreff", "erstmail", "personalization_evidence",
+                "quality_score", "lead_score", "kampagne",
+            ]].copy()
+            monday_export.insert(0, "geplanter_versand", next_monday.isoformat())
+            st.download_button(
+                f"Montagswelle Export herunterladen ({len(monday_export)} versandbereit)",
+                monday_export.to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"xing_montagswelle_{next_monday.isoformat()}_{len(monday_export)}_accounts.csv",
+                mime="text/csv",
+                key="download_monday_ready_v104",
+            )
 
         view_options = [
             f"Neu aus letztem Lauf ({len(true_new_frame)})",
@@ -2213,7 +2408,7 @@ elif page == "Salesforce Abgleich":
             metric_columns[0].metric("Zeilen im Export", row_count)
             metric_columns[1].metric("Eindeutige Firmen", len(crm_companies))
             metric_columns[2].metric("Treffer in Leadliste", len(matches))
-            st.info(f"Erkannte Firmenspalte: {detected_column}")
+            st.info(f"Erkannte Salesforce Felder: {detected_column}")
             if st.button("Salesforce Firmen dauerhaft abgleichen"):
                 combined = set(exclusions) | crm_companies
                 exclusions = persist_exclusions(combined)

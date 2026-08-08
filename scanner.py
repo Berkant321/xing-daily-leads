@@ -16,7 +16,7 @@ from urllib3.util.retry import Retry
 BA_API_BASE = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service"
 HEADERS = {
     "X-API-Key": "jobboerse-jobsuche",
-    "User-Agent": "Mozilla/5.0 (compatible; XING-Daily-Leads/9.0)",
+    "User-Agent": "Mozilla/5.0 (compatible; XING-Daily-Leads/10.4)",
     "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
 }
 
@@ -201,6 +201,11 @@ SEGMENT_KEYWORDS = {
 _ALL_SEGMENTS = set(SEGMENT_KEYWORDS)
 
 FOCUS_SEGMENTS = {
+    "Montagswelle 500 | Testpilot Fachkräfte": {
+        "Therapiepraxis", "Pflege und Medizin", "Handwerk und Technik",
+        "Industrie und Produktion", "Bau und Engineering", "Steuer und Buchhaltung",
+        "Logistik und Einkauf",
+    },
     "Testpilot Therapie 500": {"Therapiepraxis"},
     "Breite Massenkampagne": _ALL_SEGMENTS,
     "Alle Direktkunden": _ALL_SEGMENTS,
@@ -1035,6 +1040,7 @@ def _small_business_profile(
     distinct_titles = int(company_data.get("distinct_titles", 1) or 1)
     location_count = int(company_data.get("location_count", 1) or 1)
     broad_mode = focus in {"Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden"}
+    strict_wave = focus == "Montagswelle 500 | Testpilot Fachkräfte"
 
     small_hits = [keyword for keyword in SMALL_BUSINESS_SIGNALS if _norm(keyword) in company_normal]
     small_hits += [keyword for keyword in SMALL_ORGANIZATION_SIGNALS if _norm(keyword) in _norm(description[:1800])]
@@ -1114,20 +1120,28 @@ def _small_business_profile(
         score -= 45
 
     hard_reasons: list[str] = []
-    if job_count > (30 if broad_mode else 8):
+    max_jobs = 8 if strict_wave else (30 if broad_mode else 8)
+    max_locations = 4 if strict_wave else (12 if broad_mode else 3)
+    max_titles = 6 if strict_wave else (15 if broad_mode else 6)
+    max_employees = 350 if strict_wave else (3000 if broad_mode else 500)
+    if job_count > max_jobs:
         hard_reasons.append(f"{job_count} Stellen")
-    if location_count > (12 if broad_mode else 3):
+    if location_count > max_locations:
         hard_reasons.append(f"{location_count} Standorte")
-    if distinct_titles > (15 if broad_mode else 6):
+    if distinct_titles > max_titles:
         hard_reasons.append(f"{distinct_titles} unterschiedliche Rollen")
-    if employee_count > (3000 if broad_mode else 500):
+    if employee_count > max_employees:
         hard_reasons.append(f"{employee_count} Mitarbeitende")
-    if not broad_mode and (len(enterprise_hits) >= 2 or chain_hits):
+    if strict_wave and (enterprise_hits or chain_hits):
+        hard_reasons.append("Konzern oder Kettenstruktur")
+    elif not broad_mode and (len(enterprise_hits) >= 2 or chain_hits):
         hard_reasons.append("Konzern oder Kettenstruktur")
     if broad_mode and len(enterprise_hits) >= 4:
         hard_reasons.append("deutliche Konzernstruktur")
     if not broad_mode and not focus_match:
         hard_reasons.append("passt nicht zur gewählten Kampagne")
+    if strict_wave and segment == "Direktkunde":
+        hard_reasons.append("Arbeitgebersegment nicht belastbar")
 
     score = max(0, min(100, score))
     positive_small_evidence = bool(
@@ -1215,6 +1229,13 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
         if focus == "Testpilot Therapie 500" and profile["segment"] != "Therapiepraxis":
             excluded["focus"] += 1
             continue
+        if focus == "Montagswelle 500 | Testpilot Fachkräfte":
+            if not profile["focus_match"]:
+                excluded["focus"] += 1
+                continue
+            if profile["size_fit"] == "Groß oder unpassend" or int(profile["small_business_score"]) < 55:
+                excluded["oversize"] += 1
+                continue
 
         score = 10
         reasons: list[str] = []
@@ -1283,7 +1304,10 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
         # Der KMU Fit hat mehr Gewicht als reine Stellenmenge.
         score += round((int(profile["small_business_score"]) - 50) * 0.45)
         score = max(0, min(100, score))
-        minimum_score = 22 if focus in {"Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden"} else max(MIN_LEAD_SCORE, 30)
+        if focus == "Montagswelle 500 | Testpilot Fachkräfte":
+            minimum_score = 58
+        else:
+            minimum_score = 22 if focus in {"Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden"} else max(MIN_LEAD_SCORE, 30)
         if score < minimum_score:
             excluded["low_score"] += 1
             continue
