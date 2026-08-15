@@ -1095,7 +1095,7 @@ def scan_google_company_radar(
     output: list[dict] = []
     request_count = 0
     candidate_count = 0
-    page_limit = max(1, min(int(max_pages), 2))
+    page_limit = max(1, min(int(max_pages), 5))
     probe_limit = max(0, min(int(probe_limit_per_query), 20))
     seen_companies: set[str] = set()
 
@@ -1104,14 +1104,17 @@ def scan_google_company_radar(
         for city, radius in regions:
             for business_query in business_queries[:2]:
                 for page in range(page_limit):
+                    # Google Maps liefert bei sehr großen Kartenradien nur die relevantesten
+                    # Treffer und nicht alle Betriebe im Kreis. Deshalb wird der Ortsname
+                    # zusätzlich in die Suchanfrage geschrieben. So werden lokale und kleinere
+                    # Anbieter deutlich zuverlässiger sichtbar.
                     params = {
                         "engine": "google_maps",
                         "type": "search",
-                        "q": business_query,
+                        "q": f"{business_query} {city}",
                         "location": f"{city}, Germany",
                         "m": max(5000, min(int(radius) * 1000, 150000)),
                         "hl": "de",
-                        "gl": "de",
                         "start": page * 20,
                         "api_key": serpapi_key,
                     }
@@ -1853,7 +1856,7 @@ def scan_jobs(
     if "Google Firmenradar" in sources:
         jobs.extend(scan_google_company_radar(
             terms, regions, serpapi_key, diagnostics,
-            max_pages=1,
+            max_pages=max_pages,
             probe_limit_per_query=8,
         ))
     filtered = score_and_filter(jobs, diagnostics, focus=focus)

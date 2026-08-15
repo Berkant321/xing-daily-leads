@@ -1182,7 +1182,9 @@ def _task_history(logs: pd.DataFrame) -> tuple[set[str], dict[str, int]]:
         status = clean_text(row.get("status", "")).lower()
         if status == "checkpoint":
             completed.add(task_id)
-        elif status == "task_fehler":
+        elif status in {"task_fehler", "task_leer"}:
+            # Leere Suchen dürfen erneut laufen. Erst nach drei leeren oder fehlerhaften
+            # Versuchen wird die Kombination vorübergehend blockiert.
             failures[task_id] = failures.get(task_id, 0) + 1
     return completed, failures
 
@@ -1279,7 +1281,7 @@ serpapi_key = str(st.secrets.get("serpapi_key", "")).strip()
 adzuna_app_id = str(st.secrets.get("adzuna_app_id", "")).strip()
 adzuna_api_key = str(st.secrets.get("adzuna_api_key", "")).strip()
 
-st.sidebar.title("XING Daily Leads V10.2")
+st.sidebar.title("XING Daily Leads V11.1")
 page = st.sidebar.radio(
     "Bereich",
     ["Daily Leads", "Stellen", "Kampagnen Feedback", "Follow ups", "Alle Leads", "Salesforce Abgleich", "CRM Ausschluss"],
@@ -1747,10 +1749,14 @@ if page == "Daily Leads":
                             f"{job_inserted} neue Funde, {inserted} neue Firmen."
                         ),
                     )
+                    # Eine technisch erfolgreiche, aber komplett leere Radar Suche wird
+                    # nicht sofort als dauerhaft erledigt markiert. Sonst würde ein leerer
+                    # Google Maps Treffer die Kombination für alle späteren Läufe sperren.
+                    task_status = "checkpoint" if len(eligible_jobs) > 0 else "task_leer"
                     append_log(
                         scan_id=scan_id,
                         stage="Suche",
-                        status="checkpoint",
+                        status=task_status,
                         processed_terms=term,
                         processed_items=str(position),
                         found_jobs=str(len(eligible_jobs)),
@@ -1758,7 +1764,7 @@ if page == "Daily Leads":
                         updated_leads=str(updated),
                         message=(
                             f"{task_marker} {campaign_marker} {term} in {region_names} gespeichert: "
-                            f"{job_inserted} neue Stellen, {job_updated} aktualisierte Stellen."
+                            f"{len(eligible_jobs)} verwertbare Funde, {inserted} neue Firmen, {updated} aktualisierte Firmen."
                         ),
                     )
                 except Exception as exc:
