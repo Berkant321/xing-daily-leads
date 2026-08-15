@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 import time
+import traceback
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -26,6 +27,7 @@ from pipeline import (
     crm_match,
     enrich_lead,
     evaluate_lead_quality,
+    diamond_candidate_mask,
     generate_lead_assets,
     migrate_frame,
     migrate_jobs_frame,
@@ -56,6 +58,17 @@ st.set_page_config(
 
 
 CAMPAIGN_PRESETS = {
+    "Diamanten Radar | kleine Direktkunden": [
+        # Firmenradar: Nicht nur offene Stellen suchen, sondern lokale Betriebe direkt finden
+        # und deren eigene Websites sowie Karrierebereiche analysieren.
+        "Physiotherapeut", "Ergotherapeut", "Logopäde",
+        "Elektroniker", "Anlagenmechaniker SHK", "Kältetechniker", "Dachdecker",
+        "Tischler", "Metallbauer", "Mechatroniker", "Industriemechaniker",
+        "Steuerfachangestellte", "Rechtsanwaltsfachangestellte",
+        "Bauleiter", "Projektingenieur", "TGA Planer", "Bauzeichner",
+        "Softwareentwickler", "Systemadministrator",
+        "Berufskraftfahrer", "Disponent", "Fachkraft für Lagerlogistik",
+    ],
     "Montagswelle 500 | Testpilot Fachkräfte": [
         # Engpass plus erreichbare Entscheider: Therapie, Pflege, Handwerk, Technik,
         # Engineering, Steuer und Logistik. Keine beliebige Massenliste.
@@ -201,11 +214,13 @@ TESTPILOT_THERAPY_REGIONS = [
 ]
 
 CAMPAIGN_REGIONS = {
+    "Diamanten Radar | kleine Direktkunden": MONDAY_WAVE_REGIONS,
     "Montagswelle 500 | Testpilot Fachkräfte": MONDAY_WAVE_REGIONS,
     "Testpilot Therapie 500": TESTPILOT_THERAPY_REGIONS,
 }
 
 CAMPAIGN_TARGETS = {
+    "Diamanten Radar | kleine Direktkunden": 500,
     "Montagswelle 500 | Testpilot Fachkräfte": 500,
     "Testpilot Therapie 500": 500,
 }
@@ -1378,19 +1393,21 @@ if page == "Daily Leads":
         & (frame["erstmail"] != "")
     ) if not frame.empty else pd.Series(dtype=bool)
 
-    metric_columns = st.columns(6)
+    metric_columns = st.columns(7)
     metric_columns[0].metric("Gespeicherte Firmen", len(frame))
     metric_columns[1].metric("Gespeicherte Stellen", len(jobs_frame))
     small_count = int((frame.get("size_fit", pd.Series(index=frame.index, dtype=str)) == "Klein").sum()) if not frame.empty else 0
+    diamond_count = int(diamond_candidate_mask(frame).sum()) if not frame.empty else 0
     metric_columns[2].metric("Kleine Direktkunden", small_count)
-    metric_columns[3].metric("Recherche offen", research_pending)
-    metric_columns[4].metric("Texte offen", ai_pending)
-    metric_columns[5].metric("Verkaufsbereit", int(ready_mask.sum()) if not frame.empty else 0)
+    metric_columns[3].metric("Diamanten", diamond_count)
+    metric_columns[4].metric("Recherche offen", research_pending)
+    metric_columns[5].metric("Texte offen", ai_pending)
+    metric_columns[6].metric("Verkaufsbereit", int(ready_mask.sum()) if not frame.empty else 0)
 
-    with st.expander("Schritt 1: Stellen finden und Firmen sofort speichern", expanded=frame.empty):
+    with st.expander("Schritt 1: Firmen und Stellen finden", expanded=frame.empty):
         st.write(
-            "Dieser Schritt sucht nur Stellen und speichert jede fertige Suchrunde sofort. "
-            "Website Recherche und OpenAI laufen hier bewusst noch nicht."
+            "Dieser Schritt findet Stellen und auf Wunsch zusätzlich kleine lokale Unternehmen über das Google Firmenradar. "
+            "Radar Treffer werden nie automatisch als offene Vakanz behandelt. Website Recherche und Texte folgen getrennt."
         )
         campaign = st.selectbox(
             "Zielkunden Kampagne",
@@ -1405,11 +1422,18 @@ if page == "Daily Leads":
         if campaign == "Montagswelle 500 | Testpilot Fachkräfte" and not frame.empty:
             monday_balanced = balanced_monday_ready(frame[campaign_mask].copy())
             campaign_ready_count = len(monday_balanced)
+        elif campaign == "Diamanten Radar | kleine Direktkunden" and not frame.empty:
+            campaign_ready_count = int(diamond_candidate_mask(frame[campaign_mask].copy()).sum())
         else:
             campaign_ready_count = campaign_count
         if campaign_target:
             target_ratio = min(1.0, campaign_ready_count / campaign_target)
-            label = "versandbereiten, Salesforce sauberen Accounts" if campaign == "Montagswelle 500 | Testpilot Fachkräfte" else "neuen Firmen vorbereitet"
+            if campaign == "Montagswelle 500 | Testpilot Fachkräfte":
+                label = "versandbereiten, Salesforce sauberen Accounts"
+            elif campaign == "Diamanten Radar | kleine Direktkunden":
+                label = "qualifizierten Radar Kandidaten"
+            else:
+                label = "neuen Firmen vorbereitet"
             st.progress(target_ratio, text=f"Wellenziel: {campaign_ready_count} von {campaign_target} {label}")
             if campaign == "Montagswelle 500 | Testpilot Fachkräfte":
                 st.caption(
@@ -1422,6 +1446,11 @@ if page == "Daily Leads":
                     have = int((monday_all_ready.get("lead_segment", pd.Series(dtype=str)) == segment).sum()) if not monday_all_ready.empty else 0
                     quota_parts.append(f"{segment}: {min(have, quota)}/{quota}")
                 st.caption("Mix: " + " | ".join(quota_parts))
+            elif campaign == "Diamanten Radar | kleine Direktkunden":
+                st.caption(
+                    "Das Firmenradar zählt kleine neue Direktkunden mit belastbaren Firmensignalen. "
+                    "Eine offene Stelle wird nur behauptet, wenn sie auf einer echten Quelle gefunden wurde."
+                )
             else:
                 st.caption(
                     "Diese Welle priorisiert kleine Physio, Ergo und Logopädie Praxen mit aktuellem Personalbedarf. "
@@ -1439,11 +1468,31 @@ if page == "Daily Leads":
             key=f"regions_v60_{campaign}",
         )
 
-        source_columns = st.columns(4)
-        use_adzuna = source_columns[0].checkbox("Adzuna", value=bool(adzuna_app_id and adzuna_api_key), key="source_adzuna_v4")
-        use_ba = source_columns[1].checkbox("Bundesagentur", value=True, key="source_ba_v4")
-        use_google = source_columns[2].checkbox("Google Jobs", value=bool(serpapi_key), key="source_google_v60")
-        use_careers = source_columns[3].checkbox("Karriereseiten", value=False, key="source_careers_v4")
+        is_diamond_wave = campaign == "Diamanten Radar | kleine Direktkunden"
+        source_columns = st.columns(5)
+        use_radar = source_columns[0].checkbox(
+            "Google Firmenradar",
+            value=bool(serpapi_key) and is_diamond_wave,
+            key=f"source_radar_v11_{campaign}",
+            help="Findet lokale Unternehmen über Google Maps und prüft vorhandene Websites auf Karriere und Recruiting Signale.",
+        )
+        use_ba = source_columns[1].checkbox(
+            "Bundesagentur", value=not is_diamond_wave, key=f"source_ba_v11_{campaign}"
+        )
+        use_google = source_columns[2].checkbox(
+            "Google Jobs", value=bool(serpapi_key) and not is_diamond_wave, key=f"source_google_v11_{campaign}"
+        )
+        use_adzuna = source_columns[3].checkbox(
+            "Adzuna", value=bool(adzuna_app_id and adzuna_api_key) and not is_diamond_wave, key=f"source_adzuna_v11_{campaign}"
+        )
+        use_careers = source_columns[4].checkbox(
+            "Manuelle Karriereseiten", value=False, key=f"source_careers_v11_{campaign}"
+        )
+        if is_diamond_wave:
+            st.caption(
+                "Empfohlen: zuerst nur Google Firmenradar. Dadurch suchst du bewusst außerhalb der üblichen Stellenbörsen. "
+                "Jede gefundene Firmenwebsite wird auf Karriere und Recruiting Signale geprüft und anschließend in Schritt 2 vertieft."
+            )
 
         career_urls_text = st.text_area(
             "Optionale echte Karriereseiten oder ATS Boards, eine URL je Zeile",
@@ -1462,13 +1511,13 @@ if page == "Daily Leads":
             "Veröffentlicht seit Tagen", 1, 30, 14, key=f"days_v10_{campaign}"
         )
         max_pages = settings_columns[1].number_input(
-            "Seiten je Suche", 1, 5, 2 if is_testpilot_wave else 1, key=f"pages_v10_{campaign}"
+            "Seiten je Suche", 1, 5, 1 if is_diamond_wave else (2 if is_testpilot_wave else 1), key=f"pages_v11_{campaign}"
         )
         task_batch_size = settings_columns[2].number_input(
-            "Suchaufgaben pro Klick", 1, 30, 12 if is_testpilot_wave else 4, key=f"task_batch_v10_{campaign}"
+            "Suchaufgaben pro Klick", 1, 30, 6 if is_diamond_wave else (12 if is_testpilot_wave else 4), key=f"task_batch_v11_{campaign}"
         )
         region_batch_size = settings_columns[3].number_input(
-            "Regionen je Suchaufgabe", 1, 8, 4 if is_testpilot_wave else 3, key=f"region_batch_v10_{campaign}"
+            "Regionen je Suchaufgabe", 1, 8, 3 if is_diamond_wave else (4 if is_testpilot_wave else 3), key=f"region_batch_v11_{campaign}"
         )
 
         all_terms = [line.strip() for line in terms_text.splitlines() if line.strip()]
@@ -1555,6 +1604,8 @@ if page == "Daily Leads":
                 st.stop()
 
             sources: list[str] = []
+            if use_radar:
+                sources.append("Google Firmenradar")
             if use_adzuna:
                 sources.append("Adzuna")
             if use_ba:
@@ -1569,8 +1620,8 @@ if page == "Daily Leads":
             if use_adzuna and (not adzuna_app_id or not adzuna_api_key):
                 st.error("Adzuna ist aktiviert, aber die Zugangsdaten fehlen.")
                 st.stop()
-            if use_google and not serpapi_key:
-                st.error("Google Jobs ist aktiviert, aber der SerpApi Key fehlt.")
+            if (use_google or use_radar) and not serpapi_key:
+                st.error("Google Suche ist aktiviert, aber der SerpApi Key fehlt.")
                 st.stop()
 
             scan_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -1609,7 +1660,12 @@ if page == "Daily Leads":
 
             for position, (term, task_regions) in enumerate(tasks_to_run, start=1):
                 if campaign_target:
-                    current_campaign_count = int((frame["kampagne"] == campaign).sum()) if not frame.empty else 0
+                    if campaign == "Diamanten Radar | kleine Direktkunden" and not frame.empty:
+                        current_campaign_count = int(
+                            diamond_candidate_mask(frame[frame["kampagne"] == campaign].copy()).sum()
+                        )
+                    else:
+                        current_campaign_count = int((frame["kampagne"] == campaign).sum()) if not frame.empty else 0
                     if current_campaign_count >= campaign_target:
                         details.append(f"Wellenziel von {campaign_target} Firmen erreicht. Suche automatisch pausiert.")
                         break
@@ -1669,7 +1725,7 @@ if page == "Daily Leads":
                     changed_rows = frame[frame["lead_id"].isin(changed_ids)].copy()
                     persist_rows(changed_rows, frame)
 
-                    total_jobs += len(eligible_jobs)
+                    total_jobs += sum(1 for job in eligible_jobs if clean_text(job.get("title", "")))
                     total_job_inserted += job_inserted
                     total_job_updated += job_updated
                     total_inserted += inserted
@@ -1677,8 +1733,8 @@ if page == "Daily Leads":
                     successful_tasks += 1
                     completed_terms.append(term)
                     details.append(
-                        f"{term} in {region_names}: {len(eligible_jobs)} priorisierte Stellen, "
-                        f"{job_inserted} neue Stellenzeilen, {inserted} neue Firmen."
+                        f"{term} in {region_names}: {len(eligible_jobs)} priorisierte Funde, "
+                        f"{job_inserted} neue Fundzeilen, {inserted} neue Firmen."
                     )
                     details.extend(
                         f"{term} in {region_names}: {message}"
@@ -1688,7 +1744,7 @@ if page == "Daily Leads":
                         position / max(1, len(tasks_to_run)),
                         text=(
                             f"Gespeichert {position} von {len(tasks_to_run)}: {term}. "
-                            f"{job_inserted} neue Stellen, {inserted} neue Firmen."
+                            f"{job_inserted} neue Funde, {inserted} neue Firmen."
                         ),
                     )
                     append_log(
@@ -1707,34 +1763,43 @@ if page == "Daily Leads":
                     )
                 except Exception as exc:
                     failed_tasks += 1
-                    error_text = clean_text(exc)
+                    error_text = f"{type(exc).__name__}: {clean_text(exc)}"
+                    trace_text = traceback.format_exc(limit=14)
                     details.append(f"{term} in {region_names} fehlgeschlagen: {error_text}")
-                    append_log(
-                        scan_id=scan_id,
-                        stage="Suche",
-                        status="task_fehler",
-                        processed_terms=term,
-                        processed_items=str(position),
-                        message=f"{task_marker} {campaign_marker} {term} in {region_names}: {error_text}",
-                    )
+                    details.append(trace_text)
+                    st.session_state["last_search_exception"] = trace_text
+                    try:
+                        append_log(
+                            scan_id=scan_id,
+                            stage="Suche",
+                            status="task_fehler",
+                            processed_terms=term,
+                            processed_items=str(position),
+                            message=f"{task_marker} {campaign_marker} {term} in {region_names}: {error_text}",
+                        )
+                    except Exception as log_exc:
+                        details.append(f"Scan Log konnte den Fehler nicht speichern: {type(log_exc).__name__}: {clean_text(log_exc)}")
                     # Ein einzelner Quellenfehler darf die anderen Berufsgruppen nicht mehr blockieren.
                     continue
 
             progress.progress(1.0, text="Suchrunde abgeschlossen und gespeichert.")
-            append_log(
-                scan_id=scan_id,
-                stage="Suche",
-                status="fertig",
-                processed_terms=" | ".join(completed_terms),
-                processed_items=str(successful_tasks),
-                found_jobs=str(total_jobs),
-                new_leads=str(total_inserted),
-                updated_leads=str(total_updated),
-                message=(
-                    f"{campaign_marker} Suchrunde abgeschlossen: {successful_tasks} erfolgreich, "
-                    f"{failed_tasks} fehlgeschlagen."
-                ),
-            )
+            try:
+                append_log(
+                    scan_id=scan_id,
+                    stage="Suche",
+                    status="fertig",
+                    processed_terms=" | ".join(completed_terms),
+                    processed_items=str(successful_tasks),
+                    found_jobs=str(total_jobs),
+                    new_leads=str(total_inserted),
+                    updated_leads=str(total_updated),
+                    message=(
+                        f"{campaign_marker} Suchrunde abgeschlossen: {successful_tasks} erfolgreich, "
+                        f"{failed_tasks} fehlgeschlagen."
+                    ),
+                )
+            except Exception as log_exc:
+                details.append(f"Abschluss Log konnte nicht gespeichert werden: {type(log_exc).__name__}: {clean_text(log_exc)}")
             st.session_state["last_pipeline_details"] = details
             if successful_tasks:
                 st.success(
@@ -1743,7 +1808,13 @@ if page == "Daily Leads":
                     f"Suchaufgaben: {successful_tasks} erfolgreich, {failed_tasks} fehlgeschlagen."
                 )
             else:
-                st.error("Keine Suchaufgabe konnte abgeschlossen werden. Öffne die technischen Details für die Fehlerursachen.")
+                st.error("Keine Suchaufgabe konnte abgeschlossen werden.")
+                last_trace = st.session_state.get("last_search_exception", "")
+                if last_trace:
+                    st.error("Der echte Python Fehler steht direkt hier:")
+                    st.code(last_trace, language="text")
+                elif details:
+                    st.code("\n\n".join(details[-8:]), language="text")
             progress.empty()
 
     live_logs = st.session_state.get("xing_logs_cache", logs).copy()

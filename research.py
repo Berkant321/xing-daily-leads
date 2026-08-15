@@ -140,6 +140,10 @@ class ResearchResult:
     notes: str = ""
     employee_hint: str = ""
     location_hint: str = ""
+    career_signal: str = ""
+    career_job_count: int = 0
+    career_job_titles: str = ""
+    ats_detected: str = ""
     pages_crawled: int = 0
     candidate_count: int = 0
     errors: list[str] = field(default_factory=list)
@@ -159,6 +163,10 @@ class ResearchResult:
             "notes": self.notes,
             "employee_hint": self.employee_hint,
             "location_hint": self.location_hint,
+            "career_signal": self.career_signal,
+            "career_job_count": self.career_job_count,
+            "career_job_titles": self.career_job_titles,
+            "ats_detected": self.ats_detected,
             "pages_crawled": self.pages_crawled,
             "candidate_count": self.candidate_count,
             "errors": self.errors,
@@ -186,7 +194,10 @@ def clean_text(value: Any) -> str:
     if value is None:
         return ""
     value = html.unescape(str(value))
-    value = BeautifulSoup(value, "html.parser").get_text(" ")
+    # URLs und normale Texte nicht blind als HTML parsen. Das verhindert die
+    # MarkupResemblesLocatorWarning aus den Streamlit Logs.
+    if re.search(r"<[A-Za-z][^>]*>", value):
+        value = BeautifulSoup(value, "html.parser").get_text(" ")
     return re.sub(r"\s+", " ", value).strip()
 
 
@@ -590,6 +601,83 @@ def _page_priority(url: str, anchor_text: str = "") -> int:
     return score
 
 
+ATS_HOSTS = (
+    "jobs.personio.de", "greenhouse.io", "lever.co", "workdayjobs.com",
+    "smartrecruiters.com", "join.com", "recruitee.com", "onlyfy.io",
+)
+CAREER_TERMS = (
+    "karriere", "career", "jobs", "stellenangebote", "offene stellen",
+    "bewerbung", "arbeiten bei", "werde teil", "verstärkung", "verstaerkung",
+)
+
+
+def extract_career_links(homepage: str, html_text: str, limit: int = 8) -> list[str]:
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    scored: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    home_domain = root_domain(homepage)
+    for anchor in soup.find_all("a", href=True):
+        href = urljoin(homepage, anchor.get("href", "")).split("#", 1)[0]
+        if not href.startswith("http") or href in seen:
+            continue
+        host = (urlparse(href).hostname or "").lower()
+        label = normalize(f"{anchor.get_text(' ')} {href}")
+        is_ats = any(host.endswith(value) for value in ATS_HOSTS)
+        has_career_term = any(normalize(value) in label for value in CAREER_TERMS)
+        if not (is_ats or has_career_term):
+            continue
+        score = 100 if has_career_term else 60
+        if root_domain(href) == home_domain:
+            score += 20
+        if is_ats:
+            score += 15
+        seen.add(href)
+        scored.append((score, href))
+    scored.sort(reverse=True)
+    return [url for _, url in scored[:limit]]
+
+
+def extract_jobposting_titles(html_text: str) -> list[str]:
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    titles: list[str] = []
+    for node in soup.select('script[type="application/ld+json"]'):
+        raw = node.string or node.get_text() or ""
+        if not raw.strip():
+            continue
+        try:
+            data = __import__("json").loads(raw)
+        except Exception:
+            continue
+        queue = data if isinstance(data, list) else [data]
+        while queue:
+            item = queue.pop(0)
+            if isinstance(item, list):
+                queue.extend(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            graph = item.get("@graph")
+            if isinstance(graph, list):
+                queue.extend(graph)
+            item_type = item.get("@type")
+            types = item_type if isinstance(item_type, list) else [item_type]
+            if "JobPosting" not in types:
+                continue
+            title = clean_text(item.get("title", ""))
+            if title and title.lower() not in {value.lower() for value in titles}:
+                titles.append(title)
+    return titles
+
+
+def career_signal_from_text(text: str, career_url: str = "") -> str:
+    normal = normalize(text)
+    if any(normalize(value) in normal for value in ("wir suchen", "offene stellen", "stellenangebote", "jetzt bewerben", "bewerben sie sich")):
+        return "Aktives Recruiting Signal auf eigener Website"
+    if career_url or any(normalize(value) in normal for value in CAREER_TERMS):
+        return "Karrierebereich vorhanden"
+    return "Kein öffentlicher Personalbedarf gefunden"
+
+
 def collect_internal_pages(homepage: str, html_text: str, max_pages: int = 12) -> list[str]:
     soup = BeautifulSoup(html_text, "html.parser")
     scored: dict[str, int] = {homepage: 1000}
@@ -863,11 +951,28 @@ def research_company(
     website = homepage_from_url(first.url)
     result.website = website
     page_urls = collect_internal_pages(website, first.text, max_pages=max_pages)
+    career_links = extract_career_links(website, first.text, limit=8)
+    external_career_links = [url for url in career_links if not _same_site(url, website)]
+    internal_career_links = [url for url in career_links if _same_site(url, website)]
+    for url in internal_career_links:
+        if url not in page_urls:
+            page_urls.insert(1, url)
+    page_urls = page_urls[:max_pages]
+    if career_links:
+        result.career_page = career_links[0]
+    ats_hosts = sorted({
+        (urlparse(url).hostname or "").lower()
+        for url in career_links
+        if any((urlparse(url).hostname or "").lower().endswith(host) for host in ATS_HOSTS)
+    })
+    if ats_hosts:
+        result.ats_detected = ", ".join(ats_hosts[:3])
 
     all_emails: list[str] = list(dict.fromkeys(combined_hint_emails))
     all_phones: list[str] = list(dict.fromkeys(combined_hint_phones))
     all_people: list[tuple[str, str, int]] = list(combined_hint_people)
     all_texts: list[str] = []
+    career_job_titles: list[str] = []
     visited: set[str] = set()
 
     for page_url in page_urls:
@@ -892,6 +997,9 @@ def research_company(
 
         result.pages_crawled += 1
         all_texts.append(clean_page[:30000])
+        for title in extract_jobposting_titles(response.text):
+            if title.lower() not in {value.lower() for value in career_job_titles}:
+                career_job_titles.append(title)
         all_emails.extend(extract_emails(response.text, page_text))
         all_phones.extend(extract_phones(response.text, page_text))
         all_people.extend(extract_people(page_text))
@@ -903,6 +1011,21 @@ def research_company(
             result.imprint_page = response.url
         if not result.career_page and any(term in low_url for term in ("karriere", "career", "jobs", "stellenangebote")):
             result.career_page = response.url
+
+    # Externe ATS Links werden separat geprüft, ohne die Firmenwebsite zu verlassen.
+    for career_url in external_career_links[:3]:
+        response, error = _safe_get(session, career_url, timeout=18)
+        if error or not response:
+            continue
+        if "html" not in response.headers.get("content-type", "").lower():
+            continue
+        page_text = BeautifulSoup(response.text, "html.parser").get_text(" ")
+        clean_page = clean_text(page_text)
+        if clean_page:
+            all_texts.append(clean_page[:20000])
+        for title in extract_jobposting_titles(response.text):
+            if title.lower() not in {value.lower() for value in career_job_titles}:
+                career_job_titles.append(title)
 
     combined_text = " ".join(all_texts)
     result.text = combined_text[:45000]
@@ -916,6 +1039,11 @@ def research_company(
 
     result.employee_hint = extract_employee_hint(combined_text)
     result.location_hint = extract_location_hint(combined_text)
+    result.career_job_count = len(career_job_titles)
+    result.career_job_titles = " | ".join(career_job_titles[:12])
+    result.career_signal = career_signal_from_text(combined_text, result.career_page)
+    if result.career_job_count:
+        result.career_signal = f"{result.career_job_count} konkrete Stellen auf eigener Karrierequelle erkannt"
 
     if result.website and (result.email or result.phone) and result.pages_crawled >= 2:
         result.status = "vollständig"
@@ -933,7 +1061,8 @@ def research_company(
         found.append("Ansprechpartner")
     result.notes = (
         f"{result.pages_crawled} Seiten geprüft. "
-        + ("Gefunden: " + ", ".join(found) + "." if found else "Keine direkten Kontaktdaten gefunden.")
+        + ("Gefunden: " + ", ".join(found) + ". " if found else "Keine direkten Kontaktdaten gefunden. ")
+        + f"Karriere: {result.career_signal}."
     )
     if result.errors and not found:
         result.notes += " Hinweise: " + " | ".join(result.errors[:2])

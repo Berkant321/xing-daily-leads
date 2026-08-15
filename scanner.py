@@ -6,7 +6,7 @@ import re
 import time
 from datetime import date
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -16,7 +16,7 @@ from urllib3.util.retry import Retry
 BA_API_BASE = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service"
 HEADERS = {
     "X-API-Key": "jobboerse-jobsuche",
-    "User-Agent": "Mozilla/5.0 (compatible; XING-Daily-Leads/10.4)",
+    "User-Agent": "Mozilla/5.0 (compatible; XING-Daily-Leads/11.0)",
     "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
 }
 
@@ -229,6 +229,7 @@ FOCUS_SEGMENTS = {
     "Logistik und Einkauf": {"Logistik und Einkauf"},
     "Pharma und Forschung": {"Pharma und Forschung"},
     "Personal und Verwaltung": {"Personal und Verwaltung"},
+    "Diamanten Radar | kleine Direktkunden": _ALL_SEGMENTS,
 }
 
 TARGET_KEYWORDS = {
@@ -351,6 +352,13 @@ def _job(
     source: str = "",
     reference: str = "",
     term: str = "",
+    discovery_kind: str = "Vakanz",
+    need_signal: str = "",
+    website: str = "",
+    career_url: str = "",
+    evidence: str = "",
+    diamond_score: int = 0,
+    diamond_reason: str = "",
 ) -> dict:
     return {
         "reference": _clean(reference) or f"{source}:{url}:{company}:{title}",
@@ -366,6 +374,13 @@ def _job(
         "contact": _clean(contact),
         "term": _clean(term),
         "source": source,
+        "discovery_kind": _clean(discovery_kind) or "Vakanz",
+        "need_signal": _clean(need_signal),
+        "website": _clean(website),
+        "career_url": _clean(career_url),
+        "evidence": _clean(evidence),
+        "diamond_score": int(diamond_score or 0),
+        "diamond_reason": _clean(diamond_reason),
     }
 
 
@@ -827,6 +842,374 @@ def scan_career_urls(urls: list[str], diagnostics: list[str]) -> list[dict]:
     return result
 
 
+
+RADAR_CAREER_WORDS = (
+    "karriere", "career", "jobs", "stellen", "stellenangebote", "bewerbung",
+    "arbeiten bei", "werde teil", "verstärkung", "verstaerkung",
+)
+RADAR_ATS_HOSTS = (
+    "jobs.personio.de", "greenhouse.io", "lever.co", "workdayjobs.com",
+    "smartrecruiters.com", "join.com", "recruitee.com", "onlyfy.io",
+)
+RADAR_BLOCKED_WEBSITES = (
+    "google.com", "google.de", "facebook.com", "instagram.com", "linkedin.com",
+    "xing.com", "11880.com", "gelbeseiten.de", "dasoertliche.de", "cylex.de",
+)
+
+
+def _radar_website_from_local(item: dict) -> str:
+    direct = _clean(item.get("website"))
+    if direct:
+        return direct
+    links = item.get("links") or {}
+    if isinstance(links, dict):
+        direct = _clean(links.get("website") or links.get("webseite"))
+        if direct:
+            return direct
+    return ""
+
+
+def _radar_valid_website(url: str) -> bool:
+    if not url:
+        return False
+    parsed = urlparse(url if "://" in url else "https://" + url)
+    host = (parsed.hostname or "").lower().lstrip("www.")
+    return bool(host) and not any(host == blocked or host.endswith("." + blocked) for blocked in RADAR_BLOCKED_WEBSITES)
+
+
+def _radar_career_links(base_url: str, html_text: str, limit: int = 5) -> list[str]:
+    try:
+        soup = BeautifulSoup(html_text or "", "html.parser")
+    except Exception:
+        return []
+    scored: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    base_host = (urlparse(base_url).hostname or "").lower().lstrip("www.")
+    for anchor in soup.find_all("a", href=True):
+        href = urljoin(base_url, anchor.get("href", "")).split("#", 1)[0]
+        if not href.startswith("http") or href in seen:
+            continue
+        host = (urlparse(href).hostname or "").lower().lstrip("www.")
+        label = _norm(f"{anchor.get_text(' ')} {href}")
+        same_site = bool(base_host and (host == base_host or host.endswith("." + base_host)))
+        ats = any(host.endswith(ats_host) for ats_host in RADAR_ATS_HOSTS)
+        career = any(_norm(word) in label for word in RADAR_CAREER_WORDS)
+        if not (career or ats):
+            continue
+        score = (100 if career else 0) + (35 if ats else 0) + (10 if same_site else 0)
+        seen.add(href)
+        scored.append((score, href))
+    scored.sort(reverse=True)
+    return [href for _, href in scored[:limit]]
+
+
+def _radar_page_signal(text: str) -> tuple[str, int]:
+    normal = _norm(text)
+    strong = [word for word in ("wir suchen", "stellenangebote", "offene stellen", "jetzt bewerben", "bewerben sie sich", "komm ins team") if _norm(word) in normal]
+    if strong:
+        return "Recruiting Hinweis auf eigener Website", min(16, 8 + len(strong) * 2)
+    if any(_norm(word) in normal for word in RADAR_CAREER_WORDS):
+        return "Karriereseite oder Recruiting Bereich vorhanden", 7
+    return "Kein öffentlicher Personalbedarf gefunden", 0
+
+
+def _radar_diamond_score(
+    *,
+    company: str,
+    website: str,
+    phone: str,
+    career_url: str,
+    hiring_points: int,
+    segment: str,
+    reviews: int = 0,
+) -> tuple[int, str]:
+    score = 34
+    reasons: list[str] = []
+    company_norm = _norm(company)
+    if segment and segment != "Direktkunde":
+        score += 14
+        reasons.append(f"klares Segment {segment}")
+    if any(_norm(token) in company_norm for token in SMALL_BUSINESS_SIGNALS):
+        score += 12
+        reasons.append("lokales Direktkunden Signal")
+    if website:
+        score += 10
+        reasons.append("eigene Website")
+    if phone:
+        score += 6
+        reasons.append("direkte Telefonnummer")
+    if career_url:
+        score += 10
+        reasons.append("eigener Karrierebereich")
+    if hiring_points:
+        score += hiring_points
+        reasons.append("Recruiting Signal")
+    # Wenige Google Bewertungen sind nur ein schwaches Indiz für lokale Größe.
+    if 0 < reviews <= 80:
+        score += 4
+        reasons.append("kleiner lokaler Footprint")
+    if any(_norm(token) in company_norm for token in CHAIN_NAME_SIGNALS):
+        score -= 25
+    if _hit(company, LARGE_COMPANY_KEYWORDS):
+        score -= 60
+    score = max(0, min(100, score))
+    return score, ", ".join(reasons[:5]) or "lokaler Firmenfund"
+
+
+def _probe_radar_company(
+    *,
+    company: str,
+    city: str,
+    term: str,
+    website: str,
+    phone: str,
+    address: str,
+    reviews: int,
+    reference: str,
+    diagnostics: list[str],
+) -> list[dict]:
+    segment = _segment_for_employer(company, f"{address} {term}")[0]
+    career_url = ""
+    need_signal = "Kein öffentlicher Personalbedarf gefunden"
+    hiring_points = 0
+    evidence_parts = [part for part in (address, phone) if part]
+    discovered_jobs: list[dict] = []
+    page_text = ""
+
+    if website and _radar_valid_website(website):
+        if "://" not in website:
+            website = "https://" + website
+        response, error = _get(website, timeout=18)
+        if response and not error and "html" in response.headers.get("content-type", "").lower():
+            website = response.url
+            soup = BeautifulSoup(response.text, "html.parser")
+            page_text = _clean(soup.get_text(" "))[:12000]
+            direct_jobs = _jsonld_jobs(soup, response.url)
+            for job in direct_jobs:
+                job["term"] = term
+                job["source"] = "Google Firmenradar | Karriereseite"
+                job["discovery_kind"] = "Karrieresignal"
+                job["need_signal"] = "Konkrete Vakanz auf eigener Website"
+                job["website"] = website
+                job["career_url"] = response.url
+                job["evidence"] = f"Eigene Website mit strukturierter Stellenausschreibung. {address}".strip()
+            discovered_jobs.extend(direct_jobs)
+
+            career_links = _radar_career_links(response.url, response.text)
+            if career_links:
+                career_url = career_links[0]
+            for candidate in career_links[:3]:
+                if discovered_jobs:
+                    break
+                candidate_response, candidate_error = _get(candidate, timeout=16)
+                if candidate_error or not candidate_response:
+                    continue
+                ctype = candidate_response.headers.get("content-type", "").lower()
+                if "html" not in ctype and not any(host in candidate_response.url for host in RADAR_ATS_HOSTS):
+                    continue
+                try:
+                    csoup = BeautifulSoup(candidate_response.text, "html.parser")
+                except Exception:
+                    continue
+                ctext = _clean(csoup.get_text(" "))[:15000]
+                page_text += " " + ctext
+                jobs_here = _jsonld_jobs(csoup, candidate_response.url)
+                for job in jobs_here:
+                    job["term"] = term
+                    job["source"] = "Google Firmenradar | Karriereseite"
+                    job["discovery_kind"] = "Karrieresignal"
+                    job["need_signal"] = "Konkrete Vakanz auf eigener Website"
+                    job["website"] = website
+                    job["career_url"] = candidate_response.url
+                    job["evidence"] = f"Karriereseite mit strukturierter Stellenausschreibung. {address}".strip()
+                discovered_jobs.extend(jobs_here)
+                if not career_url:
+                    career_url = candidate_response.url
+
+            need_signal, hiring_points = _radar_page_signal(page_text)
+            if career_url and need_signal == "Kein öffentlicher Personalbedarf gefunden":
+                need_signal = "Karriereseite vorhanden, aktuelle Vakanz noch nicht belegt"
+                hiring_points = max(hiring_points, 6)
+        elif error:
+            diagnostics.append(f"Firmenradar Website {company}: {error}")
+
+    diamond_score, diamond_reason = _radar_diamond_score(
+        company=company,
+        website=website,
+        phone=phone,
+        career_url=career_url,
+        hiring_points=hiring_points,
+        segment=segment,
+        reviews=reviews,
+    )
+
+    for job in discovered_jobs:
+        job["diamond_score"] = max(int(job.get("diamond_score", 0) or 0), diamond_score)
+        job["diamond_reason"] = diamond_reason
+        job["lead_segment"] = segment
+
+    if discovered_jobs:
+        return discovered_jobs
+
+    evidence_parts.append(need_signal)
+    return [_job(
+        company=company,
+        title="",
+        city=city,
+        description=". ".join(part for part in [address, need_signal, page_text[:1200]] if part),
+        url=website or career_url,
+        phone=phone,
+        source="Google Firmenradar",
+        reference=reference,
+        term=term,
+        discovery_kind="Firmenradar",
+        need_signal=need_signal,
+        website=website,
+        career_url=career_url,
+        evidence=". ".join(evidence_parts)[:1600],
+        diamond_score=diamond_score,
+        diamond_reason=diamond_reason,
+    )]
+
+
+def scan_google_company_radar(
+    terms: list[str],
+    regions: list[tuple[str, int]],
+    serpapi_key: str,
+    diagnostics: list[str],
+    *,
+    max_pages: int = 1,
+    probe_limit_per_query: int = 8,
+) -> list[dict]:
+    """Findet kleine Unternehmen unabhängig von veröffentlichten Stellen.
+
+    Google Maps dient als Firmenindex. Danach werden vorhandene Firmenwebsites
+    leichtgewichtig auf Karrierebereiche und strukturierte JobPosting Daten geprüft.
+    Ein Radar Fund ohne belegte Vakanz bleibt ausdrücklich ein Potenzialkunde und
+    wird später niemals als aktive Personalsuche formuliert.
+    """
+    if not serpapi_key:
+        diagnostics.append("Google Firmenradar: nicht aktiv, SerpApi Key fehlt.")
+        return []
+
+    output: list[dict] = []
+    request_count = 0
+    candidate_count = 0
+    page_limit = max(1, min(int(max_pages), 2))
+    probe_limit = max(0, min(int(probe_limit_per_query), 20))
+    seen_companies: set[str] = set()
+
+    for term in terms:
+        business_queries = _radar_business_queries(term)
+        for city, radius in regions:
+            for business_query in business_queries[:2]:
+                for page in range(page_limit):
+                    params = {
+                        "engine": "google_maps",
+                        "type": "search",
+                        "q": business_query,
+                        "location": f"{city}, Germany",
+                        "m": max(5000, min(int(radius) * 1000, 150000)),
+                        "hl": "de",
+                        "gl": "de",
+                        "start": page * 20,
+                        "api_key": serpapi_key,
+                    }
+                    response, error = _get("https://serpapi.com/search.json", params=params, timeout=35)
+                    request_count += 1
+                    if error or not response:
+                        diagnostics.append(f"Google Firmenradar {business_query} · {city}: {error or 'keine Antwort'}")
+                        break
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        diagnostics.append(f"Google Firmenradar {business_query} · {city}: ungültige JSON Antwort")
+                        break
+                    if payload.get("error"):
+                        diagnostics.append(f"Google Firmenradar {business_query} · {city}: {payload.get('error')}")
+                        break
+                    local_results = payload.get("local_results") or []
+                    if isinstance(local_results, dict):
+                        local_results = local_results.get("places") or local_results.get("results") or []
+                    if not isinstance(local_results, list) or not local_results:
+                        break
+                    candidate_count += len(local_results)
+                    for item_index, item in enumerate(local_results):
+                        if not isinstance(item, dict):
+                            continue
+                        company = _clean(item.get("title") or item.get("name"))
+                        if not company:
+                            continue
+                        company_key = _company_key(company)
+                        if not company_key or company_key in seen_companies:
+                            continue
+                        if _hit(company, STAFFING_KEYWORDS) or _hit(company, PUBLIC_KEYWORDS) or _hit(company, LARGE_COMPANY_KEYWORDS):
+                            continue
+                        seen_companies.add(company_key)
+                        address = _clean(item.get("address"))
+                        phone = _clean(item.get("phone"))
+                        website = _radar_website_from_local(item)
+                        reviews_raw = item.get("reviews") or 0
+                        try:
+                            reviews = int(str(reviews_raw).replace(".", "").replace(",", ""))
+                        except ValueError:
+                            reviews = 0
+                        reference = _clean(item.get("data_id") or item.get("place_id") or item.get("data_cid") or f"{company}:{city}")
+
+                        # Die ersten Treffer werden sofort auf Karrieresignale geprüft.
+                        # Weitere Firmen werden trotzdem gespeichert und in Schritt 2 tief recherchiert.
+                        if item_index < probe_limit and website:
+                            records = _probe_radar_company(
+                                company=company,
+                                city=city,
+                                term=term,
+                                website=website,
+                                phone=phone,
+                                address=address,
+                                reviews=reviews,
+                                reference=reference,
+                                diagnostics=diagnostics,
+                            )
+                        else:
+                            segment = _segment_for_employer(company, f"{address} {business_query}")[0]
+                            diamond_score, diamond_reason = _radar_diamond_score(
+                                company=company,
+                                website=website,
+                                phone=phone,
+                                career_url="",
+                                hiring_points=0,
+                                segment=segment,
+                                reviews=reviews,
+                            )
+                            records = [_job(
+                                company=company,
+                                title="",
+                                city=city,
+                                description=f"Google Maps Firmenfund. {address}".strip(),
+                                url=website,
+                                phone=phone,
+                                source="Google Firmenradar",
+                                reference=reference,
+                                term=term,
+                                discovery_kind="Firmenradar",
+                                need_signal="Website und Karrierebedarf in Schritt 2 prüfen",
+                                website=website,
+                                evidence=f"Google Maps Firmenfund in {city}. {address}".strip(),
+                                diamond_score=diamond_score,
+                                diamond_reason=diamond_reason,
+                            )]
+                        output.extend(records)
+                    if len(local_results) < 20:
+                        break
+                    time.sleep(0.08)
+
+    diagnostics.append(
+        f"Google Firmenradar: {len(output)} verwertbare Firmen oder Karrieresignale aus "
+        f"{candidate_count} lokalen Treffern und {request_count} SerpApi Suchanfragen."
+    )
+    return output
+
+
 # ---------------------------------------------------------------------------
 # Deduplication und Scoring
 # ---------------------------------------------------------------------------
@@ -855,7 +1238,9 @@ def deduplicate(jobs: list[dict]) -> list[dict]:
     merged: dict[str, dict] = {}
     for job in jobs:
         key = _dedup_key(job)
-        if not job.get("company") or not job.get("title"):
+        if not job.get("company"):
+            continue
+        if not job.get("title") and job.get("discovery_kind") != "Firmenradar":
             continue
         if key not in merged:
             merged[key] = dict(job)
@@ -863,11 +1248,14 @@ def deduplicate(jobs: list[dict]) -> list[dict]:
             continue
         current = merged[key]
         current["sources"] = sorted(set(current.get("sources", []) + ([job.get("source", "")] if job.get("source") else [])))
-        for field in ("description", "email", "phone", "contact", "external_url", "job_link", "published"):
+        for field in ("description", "email", "phone", "contact", "external_url", "job_link", "published", "website", "career_url", "evidence", "need_signal", "diamond_reason"):
             if not current.get(field) and job.get(field):
                 current[field] = job[field]
         if len(job.get("description", "")) > len(current.get("description", "")):
             current["description"] = job["description"]
+        current["diamond_score"] = max(int(current.get("diamond_score", 0) or 0), int(job.get("diamond_score", 0) or 0))
+        if current.get("discovery_kind") == "Firmenradar" and job.get("discovery_kind") == "Karrieresignal":
+            current["discovery_kind"] = "Karrieresignal"
     output = list(merged.values())
     for job in output:
         job["source"] = " | ".join(job.pop("sources", []))
@@ -964,14 +1352,72 @@ def _number_location_signal(text: str) -> int:
 
 def _segment_for_term(term: str) -> str:
     value = _norm(term)
+    if any(token in value for token in ("physio", "ergo", "logo", "therapie")):
+        return "Therapiepraxis"
+    if any(token in value for token in ("pflege", "mfa", "medizin", "arzt", "zahn")):
+        return "Pflege und Medizin"
     if any(token in value for token in ("steuer", "bilanzbuch", "lohnbuch", "finanzbuch")):
         return "Steuer und Buchhaltung"
-    if any(token in value for token in ("software", "devops", "systemadmin", "it admin", "fachinformat", "sap")):
+    if any(token in value for token in ("rechtsanw", "notar", "legal", "jurist")):
+        return "Recht und Kanzlei"
+    if any(token in value for token in ("elektr", "shk", "sanitaer", "heizung", "kaelte", "klima", "dach", "tischler", "schreiner", "metallbau")):
+        return "Handwerk und Technik"
+    if any(token in value for token in ("maschinenbau", "anlagenbau", "industriemechan", "zerspan", "cnc", "produktion", "mechatron")):
+        return "Industrie und Produktion"
+    if any(token in value for token in ("software", "devops", "systemadmin", "it admin", "fachinformat", "sap", "it dienst")):
         return "IT und Digitalisierung"
-    if any(token in value for token in ("architekt", "bauleiter", "ingenieur", "tga", "bim", "konstrukteur", "bauzeichner")):
+    if any(token in value for token in ("architekt", "bauleiter", "ingenieur", "tga", "bim", "konstrukteur", "bauzeichner", "planung")):
         return "Bau und Engineering"
+    if any(token in value for token in ("logistik", "lager", "spedition", "disponent", "fahrer")):
+        return "Logistik und Einkauf"
+    if any(token in value for token in ("pharma", "labor", "biotech", "medizintechnik")):
+        return "Pharma und Forschung"
+    if any(token in value for token in ("vertrieb", "sales", "marketing")):
+        return "Vertrieb und Marketing"
     return ""
 
+
+def _radar_business_queries(term: str) -> list[str]:
+    """Übersetzt Stellenbegriffe in lokale Unternehmenssuchen.
+
+    Google Maps liefert bessere kleine Direktkunden, wenn nach Betriebstyp statt
+    nach einer Stellenbezeichnung gesucht wird. Pro Suchbegriff werden höchstens
+    zwei eng verwandte Unternehmensbegriffe verwendet.
+    """
+    value = _norm(term)
+    rules = [
+        (("physio", "physiotherapie"), ["Physiotherapie Praxis", "Physiotherapie Zentrum"]),
+        (("ergo", "ergotherapie"), ["Ergotherapie Praxis"]),
+        (("logo", "sprachtherap"), ["Logopädie Praxis", "Sprachtherapie Praxis"]),
+        (("pflege",), ["Ambulanter Pflegedienst", "Pflegedienst"]),
+        (("mfa", "medizinische fachang", "arzt"), ["Arztpraxis", "Gemeinschaftspraxis"]),
+        (("zahn",), ["Zahnarztpraxis"]),
+        (("steuer", "bilanzbuch", "lohnbuch", "finanzbuch"), ["Steuerberater", "Steuerkanzlei"]),
+        (("rechtsanw", "legal", "jurist"), ["Rechtsanwaltskanzlei"]),
+        (("notar",), ["Notariat"]),
+        (("elektr",), ["Elektrotechnik", "Elektroinstallateur"]),
+        (("shk", "anlagenmechaniker", "sanitaer", "heizung"), ["Sanitär Heizung Klima", "SHK Betrieb"]),
+        (("kaelte", "klima"), ["Kältetechnik", "Klimatechnik"]),
+        (("dach",), ["Dachdecker"]),
+        (("tischler", "schreiner"), ["Tischlerei", "Schreinerei"]),
+        (("metallbau", "schweiss"), ["Metallbau"]),
+        (("mechatron", "industriemechan", "zerspan", "cnc", "produktion"), ["Maschinenbau", "Metallverarbeitung"]),
+        (("maschinenbau", "anlagenbau"), ["Maschinenbau", "Anlagenbau"]),
+        (("bauleiter", "bauunternehmen", "polier"), ["Bauunternehmen"]),
+        (("tga", "versorgungsingenieur"), ["TGA Planungsbüro", "Ingenieurbüro Gebäudetechnik"]),
+        (("ingenieur", "konstrukteur"), ["Ingenieurbüro", "Planungsbüro"]),
+        (("architekt", "bim", "bauzeichner"), ["Architekturbüro", "Planungsbüro"]),
+        (("software", "devops", "systemadmin", "fachinformat", "it "), ["IT Dienstleister", "Softwareunternehmen"]),
+        (("spedition", "logistik", "lager", "disponent", "fahrer"), ["Spedition", "Logistikunternehmen"]),
+        (("pharma", "labor", "biotech", "medizintechnik"), ["Medizintechnik", "Labor"]),
+        (("hotel", "koch", "restaurant", "gastronomie"), ["Hotel", "Restaurant"]),
+    ]
+    for tokens, queries in rules:
+        if any(token in value for token in tokens):
+            return queries[:2]
+    # Für unbekannte Begriffe bleibt die Suche bewusst eng am Original.
+    cleaned = _clean(term)
+    return [cleaned] if cleaned else []
 
 def _term_matches_job(term: str, title: str, company: str = "", description: str = "") -> bool:
     """Verhindert breite API Treffer wie Software Architect bei Architekt."""
@@ -1039,8 +1485,9 @@ def _small_business_profile(
     job_count = int(company_data.get("job_count", 1) or 1)
     distinct_titles = int(company_data.get("distinct_titles", 1) or 1)
     location_count = int(company_data.get("location_count", 1) or 1)
-    broad_mode = focus in {"Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden"}
+    broad_mode = focus in {"Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden", "Diamanten Radar | kleine Direktkunden"}
     strict_wave = focus == "Montagswelle 500 | Testpilot Fachkräfte"
+    radar_mode = not _clean(title)
 
     small_hits = [keyword for keyword in SMALL_BUSINESS_SIGNALS if _norm(keyword) in company_normal]
     small_hits += [keyword for keyword in SMALL_ORGANIZATION_SIGNALS if _norm(keyword) in _norm(description[:1800])]
@@ -1061,7 +1508,9 @@ def _small_business_profile(
         score += 10
         reasons.append("Segment: " + segment)
 
-    if job_count <= 3:
+    if radar_mode:
+        reasons.append("Firmenradar ohne unterstellte Vakanz")
+    elif job_count <= 3:
         score += 18
         reasons.append(f"{job_count} konkrete Stelle" + ("n" if job_count != 1 else ""))
     elif job_count <= 8:
@@ -1086,7 +1535,9 @@ def _small_business_profile(
     else:
         score -= 45
 
-    if distinct_titles == 1:
+    if radar_mode:
+        pass
+    elif distinct_titles == 1:
         score += 7
     elif distinct_titles <= 4:
         score += 3
@@ -1124,11 +1575,11 @@ def _small_business_profile(
     max_locations = 4 if strict_wave else (12 if broad_mode else 3)
     max_titles = 6 if strict_wave else (15 if broad_mode else 6)
     max_employees = 350 if strict_wave else (3000 if broad_mode else 500)
-    if job_count > max_jobs:
+    if not radar_mode and job_count > max_jobs:
         hard_reasons.append(f"{job_count} Stellen")
     if location_count > max_locations:
         hard_reasons.append(f"{location_count} Standorte")
-    if distinct_titles > max_titles:
+    if not radar_mode and distinct_titles > max_titles:
         hard_reasons.append(f"{distinct_titles} unterschiedliche Rollen")
     if employee_count > max_employees:
         hard_reasons.append(f"{employee_count} Mitarbeitende")
@@ -1190,7 +1641,8 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
         term = job.get("term", "")
         combined = " ".join([company, title, description, term])
 
-        if not _term_matches_job(term, title, company, description):
+        radar_mode = _clean(job.get("discovery_kind", "")) == "Firmenradar"
+        if not radar_mode and not _term_matches_job(term, title, company, description):
             excluded["term_mismatch"] += 1
             continue
         company_low = _norm(company)
@@ -1226,6 +1678,9 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
         if focus == "Alle kleinen Direktkunden" and profile["size_fit"] != "Klein":
             excluded["oversize"] += 1
             continue
+        if focus == "Diamanten Radar | kleine Direktkunden" and profile["size_fit"] == "Groß oder unpassend":
+            excluded["oversize"] += 1
+            continue
         if focus == "Testpilot Therapie 500" and profile["segment"] != "Therapiepraxis":
             excluded["focus"] += 1
             continue
@@ -1237,20 +1692,38 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
                 excluded["oversize"] += 1
                 continue
 
-        score = 10
+        score = 26 if radar_mode else 10
         reasons: list[str] = []
-        points, hits = _weighted(combined, TARGET_KEYWORDS)
-        if points:
-            score += min(28, points)
-            reasons.append("Zielgruppe: " + ", ".join(hits[:3]))
-        points, hits = _weighted(combined, BUYING_SIGNALS)
-        if points:
-            score += min(12, points)
-            reasons.append("Recruitingdruck: " + ", ".join(hits[:3]))
-        points, hits = _weighted(description, BENEFIT_KEYWORDS)
-        if points:
-            score += min(8, points)
-            reasons.append("Benefits: " + ", ".join(hits[:3]))
+        if radar_mode:
+            score += round(int(profile["small_business_score"]) * 0.35)
+            if job.get("website"):
+                score += 8
+                reasons.append("eigene Website")
+            if job.get("phone"):
+                score += 6
+                reasons.append("direkte Telefonnummer")
+            if job.get("career_url"):
+                score += 10
+                reasons.append("Karrierebereich gefunden")
+            if job.get("need_signal") and "Kein öffentlicher" not in str(job.get("need_signal")):
+                score += 7
+                reasons.append(_clean(job.get("need_signal")))
+            if int(job.get("diamond_score", 0) or 0) >= 70:
+                score += 8
+                reasons.append("starker Diamanten Fit")
+        else:
+            points, hits = _weighted(combined, TARGET_KEYWORDS)
+            if points:
+                score += min(28, points)
+                reasons.append("Zielgruppe: " + ", ".join(hits[:3]))
+            points, hits = _weighted(combined, BUYING_SIGNALS)
+            if points:
+                score += min(12, points)
+                reasons.append("Recruitingdruck: " + ", ".join(hits[:3]))
+            points, hits = _weighted(description, BENEFIT_KEYWORDS)
+            if points:
+                score += min(8, points)
+                reasons.append("Benefits: " + ", ".join(hits[:3]))
 
         job_count = int(company_data.get("job_count", 1) or 1)
         distinct_titles = int(company_data.get("distinct_titles", 1) or 1)
@@ -1258,25 +1731,27 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
         source_count = int(company_data.get("source_count", 1) or 1)
 
         # Kleine Direktkunden werden bewusst vor großen Multipostern priorisiert.
-        if job_count == 1:
-            score += 15
-            reasons.append("konkrete Einzelvakanz")
-        elif job_count <= 3:
-            score += 20
-            reasons.append(f"{job_count} konkrete Stellen")
-        elif job_count <= 5:
-            score += 10
-            reasons.append(f"{job_count} überschaubare Stellen")
-        else:
-            score -= 8
+        # Firmenradar Treffer erhalten keinen erfundenen Stellen Bonus.
+        if not radar_mode:
+            if job_count == 1:
+                score += 15
+                reasons.append("konkrete Einzelvakanz")
+            elif job_count <= 3:
+                score += 20
+                reasons.append(f"{job_count} konkrete Stellen")
+            elif job_count <= 5:
+                score += 10
+                reasons.append(f"{job_count} überschaubare Stellen")
+            else:
+                score -= 8
 
-        if distinct_titles == 1:
-            score += 7
-            reasons.append("klares Suchprofil")
-        elif distinct_titles <= 3:
-            score += 3
-        else:
-            score -= 10
+            if distinct_titles == 1:
+                score += 7
+                reasons.append("klares Suchprofil")
+            elif distinct_titles <= 3:
+                score += 3
+            else:
+                score -= 10
 
         if location_count <= 1:
             score += 9
@@ -1306,6 +1781,8 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
         score = max(0, min(100, score))
         if focus == "Montagswelle 500 | Testpilot Fachkräfte":
             minimum_score = 58
+        elif focus == "Diamanten Radar | kleine Direktkunden":
+            minimum_score = 46
         else:
             minimum_score = 22 if focus in {"Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden"} else max(MIN_LEAD_SCORE, 30)
         if score < minimum_score:
@@ -1319,8 +1796,9 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
         job["size_fit"] = profile["size_fit"]
         job["size_reason"] = profile["size_reason"]
         job["small_business_score"] = int(profile["small_business_score"])
+        extra_reason = [_clean(job.get("diamond_reason", ""))] if radar_mode and job.get("diamond_reason") else []
         job["lead_reasons"] = "; ".join(
-            ([profile["size_reason"]] if profile["size_reason"] else []) + reasons[:6]
+            ([profile["size_reason"]] if profile["size_reason"] else []) + extra_reason + reasons[:6]
         )
         output.append(job)
 
@@ -1372,6 +1850,12 @@ def scan_jobs(
         jobs.extend(scan_google_jobs(terms, regions, days, max_pages, serpapi_key, diagnostics))
     if "Karriereseiten" in sources:
         jobs.extend(scan_career_urls(career_urls or [], diagnostics))
+    if "Google Firmenradar" in sources:
+        jobs.extend(scan_google_company_radar(
+            terms, regions, serpapi_key, diagnostics,
+            max_pages=1,
+            probe_limit_per_query=8,
+        ))
     filtered = score_and_filter(jobs, diagnostics, focus=focus)
     diagnostics.append(f"Gesamt: {len(filtered)} priorisierte Direktkunden Stellen für {focus} aus {len(sources)} aktivierten Quellen am {date.today().isoformat()}.")
     return filtered, diagnostics

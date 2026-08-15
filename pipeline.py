@@ -15,9 +15,10 @@ from research import root_domain
 from research import research_company
 from sales_ai import ASSET_KEYS, create_sales_assets
 
-PIPELINE_SCHEMA_VERSION = "10.4.0"
+PIPELINE_SCHEMA_VERSION = "11.0.0"
 MONDAY_WAVE_CAMPAIGN = "Montagswelle 500 | Testpilot Fachkräfte"
 TESTPILOT_THERAPY_CAMPAIGN = "Testpilot Therapie 500"
+DIAMOND_RADAR_CAMPAIGN = "Diamanten Radar | kleine Direktkunden"
 
 
 BENEFIT_PATTERNS = {
@@ -94,6 +95,10 @@ COLUMNS = [
     "scan_id",
     "times_seen",
     "source_list",
+    "discovery_kind",
+    "need_signal",
+    "diamond_score",
+    "diamond_reason",
     "kampagne",
     "benefits",
     "ansprechpartner",
@@ -183,6 +188,7 @@ RESEARCH_COLUMNS = [
     "ansprechpartner", "rolle", "email", "email_quality", "telefon", "website", "kontaktseite",
     "impressum", "karriereseite", "research_status", "research_notes", "research_text",
     "research_attempts", "research_updated_at", "employee_hint", "location_hint",
+    "discovery_kind", "need_signal", "diamond_score", "diamond_reason",
 ]
 TEXT_COLUMNS = ASSET_KEYS + [
     "personalization_evidence", "mail_variant", "quality_score", "quality_status", "quality_notes",
@@ -249,6 +255,10 @@ def evaluate_lead_quality(row: dict[str, Any]) -> tuple[int, str, str]:
     evidence = clean_text(row.get("personalization_evidence", ""))
     email = clean_text(row.get("email", ""))
     email_label, email_points = classify_email_quality(email)
+    discovery_kind = clean_text(row.get("discovery_kind", "")) or "Vakanz"
+    radar_mode = discovery_kind == "Firmenradar" and not job_titles
+    diamond_score = int(float(row.get("diamond_score", 0) or 0))
+    need_signal = clean_text(row.get("need_signal", ""))
     score = 0
     strengths: list[str] = []
     gaps: list[str] = []
@@ -256,6 +266,17 @@ def evaluate_lead_quality(row: dict[str, Any]) -> tuple[int, str, str]:
     if job_titles and not all(title.lower() in {"offene positionen", "offene stellen"} for title in job_titles):
         score += 12
         strengths.append("konkrete Vakanz")
+    elif radar_mode:
+        if diamond_score >= 75:
+            score += 10
+            strengths.append("starker Diamanten Fit")
+        elif diamond_score >= 60:
+            score += 6
+        if need_signal and "Kein öffentlicher Personalbedarf" not in need_signal:
+            score += 6
+            strengths.append("Karriere oder Recruiting Signal")
+        else:
+            gaps.append("aktueller Personalbedarf nicht öffentlich belegt")
     else:
         gaps.append("keine konkrete Vakanz")
     if clean_text(row.get("veroeffentlicht_am", "")):
@@ -293,14 +314,24 @@ def evaluate_lead_quality(row: dict[str, Any]) -> tuple[int, str, str]:
         score += 4
     if split_pipe(row.get("benefits", "")):
         score += 4
-    exact_subject = f"Exklusive Einladung | {company}" if company else "Exklusive Einladung"
+    exact_subject = (
+        "Frage zur Personalgewinnung"
+        if radar_mode
+        else (f"Exklusive Einladung | {company}" if company else "Exklusive Einladung")
+    )
     if subject == exact_subject:
         score += 8
     else:
         gaps.append("Betreff weicht ab")
 
     campaign = clean_text(row.get("kampagne", ""))
-    if campaign in {TESTPILOT_THERAPY_CAMPAIGN, MONDAY_WAVE_CAMPAIGN}:
+    if radar_mode:
+        required = [
+            "XING",
+            "Personalbedarf",
+            "direkt ansprechen",
+        ]
+    elif campaign in {TESTPILOT_THERAPY_CAMPAIGN, MONDAY_WAVE_CAMPAIGN}:
         required = [
             "zwei Monate",
             "zwölf Monate",
@@ -328,7 +359,8 @@ def evaluate_lead_quality(row: dict[str, Any]) -> tuple[int, str, str]:
     else:
         gaps.append(f"Kampagnenstruktur {found} von {len(required)}")
     word_count = len(re.findall(r"\b\w+\b", mail))
-    if 105 <= word_count <= 195:
+    length_ok = (70 <= word_count <= 155) if radar_mode else (105 <= word_count <= 195)
+    if length_ok:
         score += 5
     elif mail:
         gaps.append(f"Mail Länge {word_count} Wörter")
@@ -359,15 +391,18 @@ def evaluate_lead_quality(row: dict[str, Any]) -> tuple[int, str, str]:
     )
     hard_ready = bool(
         mail
-        and job_titles
+        and (job_titles or radar_mode)
         and evidence
         and (email_label in {"Direkt", "Recruiting"} or generic_on_official_domain)
         and subject == exact_subject
         and found == len(required)
         and clean_text(row.get("crm_status", "")) != "Bereits in Salesforce"
+        and (not radar_mode or diamond_score >= 65)
     )
     if score >= 85 and hard_ready:
         status = "Versandbereit"
+    elif radar_mode and score >= 62 and email:
+        status = "Kurz prüfen"
     elif score >= 70:
         status = "Kurz prüfen"
     else:
@@ -404,6 +439,25 @@ def strict_send_ready_mask(frame: pd.DataFrame | None) -> pd.Series:
         & (result["erstmail"].astype(str).str.strip() != "")
         & (result["personalization_evidence"].astype(str).str.strip() != "")
         & current_evidence
+    )
+
+
+def diamond_candidate_mask(frame: pd.DataFrame | None) -> pd.Series:
+    """Separate Queue für kleine Google Firmenradar Accounts.
+
+    Sie werden bewusst nicht mit dem harten Vakanz Ziel vermischt. Der Bedarf darf
+    bei diesen Accounts noch offen sein, CRM Sauberkeit und KMU Fit bleiben Pflicht.
+    """
+    result = migrate_frame(frame)
+    if result.empty:
+        return pd.Series(False, index=result.index, dtype=bool)
+    diamond = pd.to_numeric(result["diamond_score"], errors="coerce").fillna(0)
+    return (
+        (result["discovery_kind"].isin(["Firmenradar", "Karrieresignal"]))
+        & (diamond >= 65)
+        & (result["crm_status"] != "Bereits in Salesforce")
+        & (~result["status"].isin(["Ausschließen", "In Salesforce übernommen"]))
+        & (result["size_fit"] != "Groß oder unpassend")
     )
 
 
@@ -691,7 +745,9 @@ def classify_size_fit(
     reasons: list[str] = []
     score = current_score or 50
 
-    if job_count <= 3:
+    if job_count == 0:
+        reasons.append("Bedarf noch nicht öffentlich belegt")
+    elif job_count <= 3:
         score += 18
         reasons.append(f"{job_count} offene Stelle" + ("n" if job_count != 1 else ""))
     elif job_count <= 8:
@@ -932,6 +988,7 @@ def score_lead(
 ) -> tuple[str, int, str]:
     base_scores = [int(float(job.get("lead_score", 0) or 0)) for job in jobs]
     score = int(base_score_override) if base_score_override is not None else max(base_scores or [20])
+    radar_only = bool(jobs) and all(clean_text(job.get("discovery_kind", "")) == "Firmenradar" for job in jobs)
     reasons: list[str] = []
     penalties: list[str] = []
 
@@ -953,7 +1010,10 @@ def score_lead(
     small_scores = [int(float(job.get("small_business_score", 0) or 0)) for job in jobs]
     small_score = max(small_scores or [50])
 
-    if len(jobs) <= 3:
+    if radar_only:
+        score += 4
+        reasons.append("Firmenradar ohne unterstellte Vakanz")
+    elif len(jobs) <= 3:
         score += 12
         reasons.append(f"kleiner Bedarf mit {len(jobs)} Stelle" + ("n" if len(jobs) != 1 else ""))
     elif len(jobs) <= 5:
@@ -962,7 +1022,9 @@ def score_lead(
         score -= 45
         penalties.append("zu viele Ausschreibungen")
 
-    if len(titles) == 1:
+    if radar_only:
+        pass
+    elif len(titles) == 1:
         score += 6
         reasons.append("klares Suchprofil")
     elif len(titles) >= 2 and dominant_share >= 0.65:
@@ -1007,7 +1069,7 @@ def score_lead(
     location_hint = clean_text(research.get("location_hint", ""))
     fit_after_research, refined_small_score, refined_reason = classify_size_fit(
         company=company,
-        job_count=len(jobs),
+        job_count=0 if radar_only else len(jobs),
         locations=max(1, _hint_number(location_hint) or 1),
         segment=segment,
         employee_hint=employee_hint,
@@ -1055,38 +1117,63 @@ def build_discovery_leads(
     existing_map = {row["lead_id"]: row.to_dict() for _, row in existing.iterrows()}
     rows: list[dict[str, Any]] = []
     skipped = 0
+    radar_count = 0
+    vacancy_count = 0
 
     for jobs in groups.values():
         company = clean_text(jobs[0].get("company", ""))
         if likely_large_or_agency(company):
             skipped += 1
             continue
+
+        vacancy_jobs = [job for job in jobs if clean_text(job.get("title", ""))]
+        radar_only = bool(jobs) and not vacancy_jobs
+        discovery_kind = "Firmenradar" if radar_only else (
+            "Karrieresignal" if any(clean_text(job.get("discovery_kind", "")) == "Karrieresignal" for job in jobs) else "Vakanz"
+        )
+        if radar_only:
+            radar_count += 1
+        else:
+            vacancy_count += 1
+
         lead_segment = clean_text(next((job.get("lead_segment", "") for job in jobs if job.get("lead_segment")), ""))
-        lead_segment = lead_segment or infer_lead_segment(" ".join([company] + [job.get("title", "") for job in jobs]))
+        lead_segment = lead_segment or infer_lead_segment(
+            " ".join([company] + [job.get("title", "") for job in jobs] + [job.get("description", "")[:1200] for job in jobs])
+        )
         size_fit = clean_text(next((job.get("size_fit", "") for job in jobs if job.get("size_fit")), "")) or "Mittel"
         small_business_score = max([int(float(job.get("small_business_score", 0) or 0)) for job in jobs] or [50])
         size_reason = clean_text(next((job.get("size_reason", "") for job in jobs if job.get("size_reason")), ""))
-        broad_campaign = focus in {"Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden"}
+        broad_campaign = focus in {"Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden", DIAMOND_RADAR_CAMPAIGN}
         if focus == "Chancenmix Architektur Ingenieurwesen Steuer IT":
             max_jobs = 15
         elif focus == MONDAY_WAVE_CAMPAIGN:
             max_jobs = 8
         else:
             max_jobs = 25 if broad_campaign else 8
-        if size_fit == "Groß oder unpassend" or len(jobs) > max_jobs:
+        if size_fit == "Groß oder unpassend" or len(vacancy_jobs) > max_jobs:
             skipped += 1
             continue
+
         lid = lead_id(company)
         old = existing_map.get(lid, {})
+        website = next((clean_text(job.get("website", "")) for job in jobs if job.get("website")), "")
+        career_page = next((clean_text(job.get("career_url", "")) for job in jobs if job.get("career_url")), "")
+        need_signal = next((clean_text(job.get("need_signal", "")) for job in jobs if job.get("need_signal")), "")
+        if not need_signal:
+            need_signal = "Konkrete Vakanz gefunden" if vacancy_jobs else "Personalbedarf prüfen"
+        diamond_score = max([int(float(job.get("diamond_score", 0) or 0)) for job in jobs] or [0])
+        diamond_reason = clean_text(next((job.get("diamond_reason", "") for job in jobs if job.get("diamond_reason")), ""))
+        source_evidence = unique([job.get("evidence", "") for job in jobs if job.get("evidence")])
+
         direct_research = {
             "email": next((clean_text(job.get("email", "")) for job in jobs if job.get("email")), ""),
             "phone": next((clean_text(job.get("phone", "")) for job in jobs if job.get("phone")), ""),
             "person": next((clean_text(job.get("contact", "")) for job in jobs if job.get("contact")), ""),
             "role": "",
-            "website": "",
+            "website": website,
             "location_hint": "",
         }
-        benefits = unique(detect_benefits(" ".join(clean_text(job.get("description", "")) for job in jobs)))
+        benefits = unique(detect_benefits(" ".join(clean_text(job.get("description", "")) for job in vacancy_jobs)))
         previous_times = int(float(old.get("times_seen", 0) or 0)) if old else 0
         hot_status, score, reason = score_lead(
             company,
@@ -1097,14 +1184,21 @@ def build_discovery_leads(
         )
 
         family_summary: dict[str, int] = {}
-        for job in jobs:
+        for job in vacancy_jobs:
             family = job_family(job.get("title", ""))
             family_summary[family] = family_summary.get(family, 0) + 1
         grouped_jobs = ", ".join(
             f"{amount}× {family}"
             for family, amount in sorted(family_summary.items(), key=lambda item: item[1], reverse=True)[:4]
         )
-        titles = unique([job.get("title", "") for job in jobs])
+        titles = unique([job.get("title", "") for job in vacancy_jobs])
+        context_chunks = [
+            f"{clean_text(job.get('title', ''))}: {clean_text(job.get('description', ''))[:2200]}"
+            for job in vacancy_jobs[:8]
+            if clean_text(job.get("description", ""))
+        ]
+        if source_evidence:
+            context_chunks.append("Firmenradar: " + " | ".join(source_evidence[:4]))
 
         row = empty_row()
         row.update({
@@ -1118,34 +1212,39 @@ def build_discovery_leads(
             "small_business_score": str(small_business_score),
             "size_reason": size_reason,
             "warum_hot": reason,
-            "offene_stellen": grouped_jobs or " | ".join(titles[:6]),
+            "offene_stellen": grouped_jobs or (" | ".join(titles[:6]) if titles else need_signal),
             "job_titles": " | ".join(titles[:12]),
-            "job_context": "\n\n".join(
-                f"{clean_text(job.get('title', ''))}: {clean_text(job.get('description', ''))[:2200]}"
-                for job in jobs[:8]
-                if clean_text(job.get("description", ""))
-            )[:12000],
-            "anzahl_stellen": str(len(jobs)),
+            "job_context": "\n\n".join(context_chunks)[:12000],
+            "anzahl_stellen": str(len(vacancy_jobs)),
             "orte": " | ".join(unique([job.get("city", "") for job in jobs])),
-            "veroeffentlicht_am": max([job.get("published", "") for job in jobs if job.get("published")] or [""]),
+            "veroeffentlicht_am": max([job.get("published", "") for job in vacancy_jobs if job.get("published")] or [""]),
             "zuletzt_gefunden": date.today().isoformat(),
             "scan_id": scan_id,
-            "kampagne": focus,
             "source_list": " | ".join(unique([
                 source.strip()
                 for job in jobs
                 for source in str(job.get("source", "")).split("|")
                 if source.strip()
             ])),
+            "discovery_kind": discovery_kind,
+            "need_signal": need_signal,
+            "diamond_score": str(diamond_score),
+            "diamond_reason": diamond_reason,
+            "kampagne": focus,
             "benefits": " | ".join(benefits),
             "ansprechpartner": direct_research["person"],
             "email": direct_research["email"],
             "email_quality": classify_email_quality(direct_research["email"])[0],
             "telefon": direct_research["phone"],
-            "stellenlink": next((clean_text(job.get("job_link", "")) for job in jobs if job.get("job_link")), ""),
-            "pipeline_stage": "Gefunden",
+            "website": website,
+            "karriereseite": career_page,
+            "stellenlink": next((clean_text(job.get("job_link", "")) for job in vacancy_jobs if job.get("job_link")), ""),
+            "pipeline_stage": "Firmenradar" if radar_only else "Gefunden",
             "research_status": "offen",
-            "research_notes": "Noch nicht recherchiert. Der Suchlauf wurde bereits gespeichert.",
+            "research_notes": (
+                f"Firmenradar Fund. {need_signal}. Website und Kontaktdaten werden in Schritt 2 vertieft."
+                if radar_only else "Noch nicht recherchiert. Der Suchlauf wurde bereits gespeichert."
+            ),
             "research_text": "",
             "ai_status": "offen",
             "quality_score": "0",
@@ -1160,13 +1259,12 @@ def build_discovery_leads(
         rows.append(row)
 
     diagnostics = [
-        f"Firmen aus Stellen gruppiert: {len(groups)}",
-        f"Direkt als kleiner Lead vorbereitet: {len(rows)} ({focus})",
+        f"Firmen aus Quellen gruppiert: {len(groups)}",
+        f"Leads vorbereitet: {len(rows)} davon {vacancy_count} mit Vakanz und {radar_count} reine Firmenradar Funde ({focus})",
         f"Vermittler, Ketten oder zu große Unternehmen zusätzlich übersprungen: {skipped}",
-        "Kontaktdaten und Texte werden bewusst erst in Schritt 2 und 3 erzeugt.",
+        "Firmenradar Funde ohne belegte Vakanz werden im Text ausdrücklich neutral behandelt.",
     ]
     return migrate_frame(pd.DataFrame(rows)), diagnostics
-
 
 def upsert_leads(
     existing: pd.DataFrame,
@@ -1324,6 +1422,32 @@ def enrich_lead(
     item["research_status"] = clean_text(research.get("status", "")) or "abgeschlossen"
     item["research_notes"] = clean_text(research.get("notes", ""))
     item["research_text"] = clean_text(research.get("text", ""))[:12000]
+    career_signal = clean_text(research.get("career_signal", ""))
+    career_job_count = int(float(research.get("career_job_count", 0) or 0))
+    career_job_titles = clean_text(research.get("career_job_titles", ""))
+    if career_signal:
+        item["need_signal"] = career_signal
+    if career_job_count > 0 and clean_text(item.get("discovery_kind", "")) == "Firmenradar":
+        item["discovery_kind"] = "Karrieresignal"
+        item["anzahl_stellen"] = str(career_job_count)
+        if career_job_titles:
+            item["job_titles"] = career_job_titles
+            item["offene_stellen"] = career_job_titles
+    if clean_text(item.get("discovery_kind", "")) == "Firmenradar":
+        diamond = int(float(item.get("diamond_score", 0) or 0))
+        if item.get("website"):
+            diamond += 7
+        if item.get("email"):
+            diamond += 8
+        if item.get("telefon"):
+            diamond += 4
+        if item.get("karriereseite"):
+            diamond += 8
+        if career_signal and "Kein öffentlicher Personalbedarf" not in career_signal:
+            diamond += 6
+        item["diamond_score"] = str(max(0, min(100, diamond)))
+        reasons = unique([item.get("diamond_reason", ""), career_signal, "Website Recherche abgeschlossen" if item.get("website") else ""])
+        item["diamond_reason"] = "; ".join(reasons[:4])
     item["email_quality"] = classify_email_quality(item.get("email", ""))[0]
     item["research_attempts"] = str(attempts)
     item["research_updated_at"] = now
@@ -1347,7 +1471,7 @@ def enrich_lead(
     location_count = max(1, _hint_number(item.get("location_hint", "")) or len(split_pipe(item.get("orte", ""))) or 1)
     fit, small_score, size_reason = classify_size_fit(
         company=item.get("firma", ""),
-        job_count=max(1, int(float(item.get("anzahl_stellen", 1) or 1))),
+        job_count=(0 if clean_text(item.get("discovery_kind", "")) == "Firmenradar" else max(1, int(float(item.get("anzahl_stellen", 1) or 1)))),
         locations=location_count,
         segment=segment,
         employee_hint=item.get("employee_hint", ""),
@@ -1442,6 +1566,10 @@ def generate_lead_assets(
         "notes": item.get("research_notes", ""),
         "employee_hint": item.get("employee_hint", ""),
         "location_hint": item.get("location_hint", ""),
+        "discovery_kind": item.get("discovery_kind", ""),
+        "need_signal": item.get("need_signal", ""),
+        "diamond_score": item.get("diamond_score", ""),
+        "diamond_reason": item.get("diamond_reason", ""),
     }
     benefits = split_pipe(item.get("benefits", ""))
     try:

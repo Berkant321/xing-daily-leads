@@ -37,6 +37,7 @@ REQUIRED_MAIL_PHRASES = (
 
 TESTPILOT_CAMPAIGN = "Testpilot Therapie 500"
 MONDAY_WAVE_CAMPAIGN = "Montagswelle 500 | Testpilot Fachkräfte"
+DIAMOND_RADAR_CAMPAIGN = "Diamanten Radar | kleine Direktkunden"
 TESTPILOT_REQUIRED_PHRASES = (
     "zwei Monate",
     "zwölf Monate",
@@ -484,6 +485,99 @@ Berkant Devrim"""
     return result
 
 
+def _radar_assets(
+    company: str,
+    jobs: list[dict],
+    benefits: list[str],
+    person: str,
+    research: dict[str, Any],
+) -> dict[str, str]:
+    salutation = _salutation(person)
+    need_signal = _clean_single(research.get("need_signal", ""))
+    diamond_reason = _clean_single(research.get("diamond_reason", ""))
+    website = _clean_single(research.get("website", ""))
+    career_page = _clean_single(research.get("career_page", ""))
+
+    if career_page and need_signal and "Kein öffentlicher" not in need_signal:
+        intro = f"bei {company} ist ein eigener Karrierebereich sichtbar. {need_signal}."
+        evidence = f"Karrierebereich: {need_signal}"
+    elif website:
+        intro = f"ich bin bei meiner Recherche auf {company} als regionalen Arbeitgeber gestoßen."
+        evidence = diamond_reason or "eigene Unternehmenswebsite und regionaler Firmenfund"
+    else:
+        intro = f"ich bin bei meiner Recherche auf {company} als regionales Unternehmen gestoßen."
+        evidence = diamond_reason or "regionaler Firmenfund"
+
+    mail = f"""{salutation}
+
+{intro}
+
+Ich spreche aktuell bewusst mit kleineren Unternehmen, bei denen Personalbedarf nicht immer auf den großen Stellenbörsen sichtbar ist.
+
+Wenn bei Ihnen neue Fachkräfte gebraucht werden, können Sie über XING nicht nur Stellen sichtbar machen, sondern passende und wechselbereite Fachkräfte gezielt finden und direkt ansprechen.
+
+Mich interessiert deshalb weniger, ob heute bereits eine konkrete Stelle online ist, sondern wie Sie neuen Personalbedarf aktuell lösen.
+
+Wäre ein kurzer Austausch dazu grundsätzlich interessant?
+
+Beste Grüße aus Münster
+Berkant Devrim"""
+
+    opener = (
+        f"Guten Tag, Berkant Devrim von XING. Ich bin bei meiner Recherche auf {company} gestoßen. "
+        "Ich spreche gerade bewusst mit kleineren regionalen Arbeitgebern, bei denen Personalbedarf nicht immer öffentlich ausgeschrieben wird. "
+        "Wie lösen Sie es heute, wenn kurzfristig eine passende Fachkraft gebraucht wird?"
+    )
+    discovery = "\n".join([
+        "1. Wie entsteht bei Ihnen typischerweise neuer Personalbedarf?",
+        "2. Welche Fachkräfte sind für Sie grundsätzlich am schwersten zu finden?",
+        "3. Nutzen Sie heute eher Empfehlungen, eigene Netzwerke oder Stellenbörsen?",
+        "4. Wie gut funktioniert das, wenn eine Position kurzfristig besetzt werden muss?",
+        "5. Welche Profile würden Sie auch ohne akute Ausschreibung kennenlernen?",
+        "6. Wer kümmert sich bei Ihnen um Recruiting, wenn Bedarf entsteht?",
+        "7. Welche Einstellungen erwarten Sie in den kommenden zwölf Monaten?",
+        "8. Was müsste ein zusätzlicher Recruiting Kanal leisten, damit er für Sie relevant wird?",
+    ])
+    challenger = (
+        "Gerade kleinere Arbeitgeber veröffentlichen Personalbedarf oft erst dann, wenn die Lücke bereits da ist. "
+        "Ein eigener Zugang zu wechselbereiten Fachkräften schafft vorher eine zusätzliche Option, ohne dass dauerhaft Stellen ausgeschrieben sein müssen."
+    )
+    follow1 = f"""{salutation}
+
+ich greife meine Nachricht zu {company} noch einmal kurz auf.
+
+Mir geht es nicht darum, Ihnen eine offene Stelle zu unterstellen. Spannend ist vielmehr, wie Sie passende Fachkräfte erreichen, sobald bei Ihnen neuer Personalbedarf entsteht.
+
+Wäre ein kurzer Austausch dazu grundsätzlich interessant?
+
+Beste Grüße aus Münster
+Berkant Devrim"""
+    follow2 = f"""{salutation}
+
+falls das Thema Personalgewinnung bei Ihnen aktuell keine Rolle spielt, hake ich es gerne ab.
+
+Wenn Sie grundsätzlich offen dafür sind, passende Fachkräfte auch unabhängig von einer öffentlichen Ausschreibung kennenzulernen, können wir uns kurz austauschen.
+
+Beste Grüße aus Münster
+Berkant Devrim"""
+
+    result = {
+        "erstmail_betreff": "Frage zur Personalgewinnung",
+        "erstmail": mail,
+        "call_opener": opener,
+        "discovery_fragen": discovery,
+        "challenger_reframe": challenger,
+        "follow_up_1": follow1,
+        "follow_up_2": follow2,
+        "personalization_evidence": evidence,
+        "mail_variant": "Diamanten Radar V1",
+        "ai_status": "Fallback genutzt",
+    }
+    for key in ASSET_KEYS:
+        result[key] = _no_customer_hyphens(_clean_multiline(result[key]))
+    return result
+
+
 def _extract_json_object(raw: str) -> dict[str, Any]:
     raw = str(raw or "").strip()
     if raw.startswith("```"):
@@ -511,14 +605,19 @@ def _response_text(response: Any) -> str:
     return "\n".join(chunks)
 
 
-def _valid_campaign_mail(mail: str, company: str, campaign: str = "") -> bool:
+def _valid_campaign_mail(mail: str, company: str, campaign: str = "", radar_mode: bool = False) -> bool:
     text = _clean_multiline(mail)
     words = len(re.findall(r"\b\w+\b", text))
-    if not 95 <= words <= 195:
+    if radar_mode:
+        if not 75 <= words <= 155:
+            return False
+    elif not 95 <= words <= 195:
         return False
     if company.lower() not in text.lower():
         return False
-    if campaign == TESTPILOT_CAMPAIGN:
+    if radar_mode:
+        required = ("XING", "Personalbedarf", "direkt ansprechen")
+    elif campaign == TESTPILOT_CAMPAIGN:
         required = TESTPILOT_REQUIRED_PHRASES
     elif campaign == MONDAY_WAVE_CAMPAIGN:
         required = MONDAY_REQUIRED_PHRASES
@@ -539,7 +638,11 @@ def create_sales_assets(
     campaign: str = "",
 ) -> dict[str, str]:
     research = research or {}
-    if campaign == TESTPILOT_CAMPAIGN:
+    titles = _job_titles(jobs)
+    radar_mode = _clean_single(research.get("discovery_kind", "")) == "Firmenradar" and not titles
+    if radar_mode:
+        fallback = _radar_assets(company, jobs, benefits, person, research)
+    elif campaign == TESTPILOT_CAMPAIGN:
         fallback = _testpilot_assets(company, jobs, benefits, person, research)
     elif campaign == MONDAY_WAVE_CAMPAIGN:
         fallback = _monday_assets(company, jobs, benefits, person, research)
@@ -552,7 +655,6 @@ def create_sales_assets(
         fallback["ai_status"] = "Fallback: OpenAI Key fehlt"
         return fallback
 
-    titles = _job_titles(jobs)
     cities: list[str] = []
     for job in jobs:
         city = _clean_single(job.get("city", ""))
@@ -564,9 +666,21 @@ def create_sales_assets(
         if job.get("description")
     )[:12000]
     website_text = _clean_single(research.get("text", ""))[:12000]
-    exact_subject = f"Exklusive Einladung | {company}"
+    exact_subject = "Frage zur Personalgewinnung" if radar_mode else f"Exklusive Einladung | {company}"
     deterministic_variant = int(hashlib.sha1(company.encode("utf-8")).hexdigest()[:2], 16) % 2 + 1
-    if campaign == MONDAY_WAVE_CAMPAIGN:
+    if radar_mode:
+        campaign_rules = """
+Spezielle Firmenradar Ansprache:
+4. Es ist ausdrücklich NICHT belegt, dass aktuell eine Stelle offen ist. Unterstelle niemals eine Vakanz.
+5. Verwende den belegten Firmen oder Karrierehinweis als Einstieg, ohne Lob und ohne zu behaupten, die Firma suche gerade Personal.
+6. Erkläre knapp: Wenn Personalbedarf entsteht, kann XING Sichtbarkeit mit der gezielten Auswahl und direkten Ansprache wechselbereiter Fachkräfte verbinden.
+7. Verwende die Begriffe XING, Personalbedarf und direkt ansprechen.
+8. Frage offen, wie das Unternehmen neuen Personalbedarf aktuell löst oder ob ein kurzer Austausch grundsätzlich interessant ist.
+9. Keine Preise, Rabatte, künstliche Verknappung oder unbelegte Recruiting Probleme nennen.
+10. Die Erstmail umfasst 75 bis 135 Wörter.
+"""
+        mail_variant_name = f"Diamanten Radar V{deterministic_variant}"
+    elif campaign == MONDAY_WAVE_CAMPAIGN:
         campaign_rules = """
 Spezielle Kampagne Montagswelle 500:
 4. Schreibe wie ein echter Account Executive, nicht wie ein Marketing Bot. Kurze klare Sätze. Keine Floskeln wie ich habe mir Ihre Website angesehen.
@@ -625,8 +739,11 @@ Fakten:
 Unternehmen: {company}
 Ansprechpartner: {person or 'nicht sicher bekannt'}
 Rolle des Ansprechpartners: {_clean_single(research.get('role', '')) or 'nicht sicher bekannt'}
-Offene Rollen: {', '.join(titles[:8]) or 'nicht eindeutig'}
-Anzahl gefundener Stellen: {len(jobs)}
+Offene Rollen: {', '.join(titles[:8]) or 'keine öffentliche Vakanz belegt'}
+Anzahl gefundener Stellen: {len(titles)}
+Discovery Art: {_clean_single(research.get('discovery_kind', '')) or 'Vakanz'}
+Bedarfssignal: {_clean_single(research.get('need_signal', '')) or 'nicht eindeutig'}
+Diamanten Hinweis: {_clean_single(research.get('diamond_reason', '')) or 'kein zusätzlicher Hinweis'}
 Orte: {', '.join(cities[:8]) or 'nicht eindeutig'}
 Erkannte Benefits: {', '.join(benefits[:12]) or 'keine eindeutig erkannt'}
 Website: {_clean_single(research.get('website', '')) or 'nicht gefunden'}
@@ -658,7 +775,7 @@ Keine Markdown Formatierung.
             value = _clean_multiline(data.get(key, ""))
             result[key] = _no_customer_hyphens(value) if value else fallback[key]
         result["erstmail_betreff"] = exact_subject
-        if not _valid_campaign_mail(result["erstmail"], company, campaign):
+        if not _valid_campaign_mail(result["erstmail"], company, campaign, radar_mode=radar_mode):
             result["erstmail"] = fallback["erstmail"]
             mail_source = "Mailstruktur durch Fallback gesichert"
         else:
