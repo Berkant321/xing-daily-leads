@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import time
@@ -12,6 +13,8 @@ import requests
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+LOGOPAEDIE_RADAR_CAMPAIGN = "Logopädie Radar Deutschland"
 
 BA_API_BASE = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service"
 HEADERS = {
@@ -207,6 +210,7 @@ FOCUS_SEGMENTS = {
         "Logistik und Einkauf",
     },
     "Testpilot Therapie 500": {"Therapiepraxis"},
+    LOGOPAEDIE_RADAR_CAMPAIGN: {"Therapiepraxis"},
     "Breite Massenkampagne": _ALL_SEGMENTS,
     "Alle Direktkunden": _ALL_SEGMENTS,
     "Alle kleinen Direktkunden": _ALL_SEGMENTS,
@@ -1084,6 +1088,7 @@ def scan_google_company_radar(
     *,
     max_pages: int = 1,
     probe_limit_per_query: int = 8,
+    focus: str = "Alle kleinen Direktkunden",
 ) -> list[dict]:
     """Findet kleine Unternehmen unabhängig von veröffentlichten Stellen.
 
@@ -1101,12 +1106,12 @@ def scan_google_company_radar(
     candidate_count = 0
     page_limit = max(1, min(int(max_pages), 5))
     probe_limit = max(0, min(int(probe_limit_per_query), 20))
-    seen_companies: set[str] = set()
+    seen_places: set[str] = set()
 
     for term in terms:
-        business_queries = _radar_business_queries(term)
         for city, radius in regions:
-            for business_query in business_queries[:2]:
+            business_queries = _radar_queries_for_region(term, city, focus)
+            for business_query in business_queries:
                 for page in range(page_limit):
                     # Google Maps liefert bei sehr großen Kartenradien nur die relevantesten
                     # Treffer und nicht alle Betriebe im Kreis. Deshalb wird der Ortsname
@@ -1153,21 +1158,23 @@ def scan_google_company_radar(
                         if not company:
                             continue
                         company_key = _company_key(company)
-                        if not company_key or company_key in seen_companies:
+                        if not company_key:
                             continue
                         if _hit(company, STAFFING_KEYWORDS) or _hit(company, PUBLIC_KEYWORDS) or _hit(company, LARGE_COMPANY_KEYWORDS):
                             continue
-                        seen_companies.add(company_key)
                         address = _clean(item.get("address"))
                         phone = _clean(item.get("phone"))
                         website = _radar_website_from_local(item)
+                        reference = _clean(item.get("data_id") or item.get("place_id") or item.get("data_cid") or f"{company}:{city}:{address}")
+                        place_key = _radar_place_key(company, city, address, website, reference)
+                        if not place_key or place_key in seen_places:
+                            continue
+                        seen_places.add(place_key)
                         reviews_raw = item.get("reviews") or 0
                         try:
                             reviews = int(str(reviews_raw).replace(".", "").replace(",", ""))
                         except ValueError:
                             reviews = 0
-                        reference = _clean(item.get("data_id") or item.get("place_id") or item.get("data_cid") or f"{company}:{city}")
-
                         # Die ersten Treffer werden sofort auf Karrieresignale geprüft.
                         # Weitere Firmen werden trotzdem gespeichert und in Schritt 2 tief recherchiert.
                         if item_index < probe_limit and website:
@@ -1197,7 +1204,7 @@ def scan_google_company_radar(
                                 company=company,
                                 title="",
                                 city=city,
-                                description=f"Google Maps Firmenfund. {address}".strip(),
+                                description=f"Google Maps Firmenfund. Kategorie: {business_query}. {address}".strip(),
                                 url=website,
                                 phone=phone,
                                 source="Google Firmenradar",
@@ -1206,7 +1213,7 @@ def scan_google_company_radar(
                                 discovery_kind="Firmenradar",
                                 need_signal="Website und Karrierebedarf in Schritt 2 prüfen",
                                 website=website,
-                                evidence=f"Google Maps Firmenfund in {city}. {address}".strip(),
+                                evidence=f"Google Maps Firmenfund in {city}. Suchkategorie: {business_query}. {address}".strip(),
                                 diamond_score=diamond_score,
                                 diamond_reason=diamond_reason,
                             )]
@@ -1239,11 +1246,29 @@ def _company_key(company: str) -> str:
 
 
 def _dedup_key(job: dict) -> str:
+    if _clean(job.get("discovery_kind", "")) == "Firmenradar":
+        reference = _clean(job.get("reference", ""))
+        if reference:
+            return "radar|" + _norm(reference)
+        website = _clean(job.get("website", ""))
+        if website:
+            try:
+                host = (urlparse(website).hostname or "").lower().removeprefix("www.")
+            except Exception:
+                host = ""
+            if host:
+                return "radar|web|" + host
     return "|".join([
         _company_key(job.get("company", "")),
         re.sub(r"\W+", "", _norm(job.get("title", ""))),
         re.sub(r"\W+", "", _norm(job.get("city", ""))),
     ])
+
+
+def _company_stats_key(job: dict) -> str:
+    if _clean(job.get("discovery_kind", "")) == "Firmenradar":
+        return _dedup_key(job)
+    return _company_key(job.get("company", ""))
 
 
 def deduplicate(jobs: list[dict]) -> list[dict]:
@@ -1295,7 +1320,7 @@ def _weighted(text: str, mapping: dict[str, int]) -> tuple[int, list[str]]:
 def _company_stats(jobs: list[dict]) -> dict[str, dict]:
     grouped: dict[str, list[dict]] = {}
     for job in jobs:
-        grouped.setdefault(_company_key(job.get("company", "")), []).append(job)
+        grouped.setdefault(_company_stats_key(job), []).append(job)
     result = {}
     for key, items in grouped.items():
         result[key] = {
@@ -1392,15 +1417,29 @@ def _segment_for_term(term: str) -> str:
 def _radar_business_queries(term: str) -> list[str]:
     """Übersetzt Stellenbegriffe in lokale Unternehmenssuchen.
 
-    Google Maps liefert bessere kleine Direktkunden, wenn nach Betriebstyp statt
-    nach einer Stellenbezeichnung gesucht wird. Pro Suchbegriff werden höchstens
-    zwei eng verwandte Unternehmensbegriffe verwendet.
+    Standardkampagnen bleiben bewusst kompakt. Für die deutschlandweite
+    Logopädie Rohsammlung steht dagegen ein breiter Synonympool bereit.
+    Welche Varianten je Region tatsächlich abgefragt werden, entscheidet
+    _radar_queries_for_region.
     """
     value = _norm(term)
     rules = [
         (("physio", "physiotherapie"), ["Physiotherapie Praxis", "Physiotherapie Zentrum"]),
         (("ergo", "ergotherapie"), ["Ergotherapie Praxis"]),
-        (("logo", "sprachtherap"), ["Logopädie Praxis", "Sprachtherapie Praxis"]),
+        (("logo", "sprachtherap"), [
+            "Logopädie",
+            "Logopädie Praxis",
+            "Praxis für Logopädie",
+            "Logopädische Praxis",
+            "Sprachtherapie",
+            "Praxis für Sprachtherapie",
+            "Sprachtherapeutische Praxis",
+            "Stimmtherapie",
+            "Sprechtherapie",
+            "Schlucktherapie",
+            "Therapiezentrum Logopädie",
+            "Interdisziplinäres Therapiezentrum Logopädie",
+        ]),
         (("pflege",), ["Ambulanter Pflegedienst", "Pflegedienst"]),
         (("mfa", "medizinische fachang", "arzt"), ["Arztpraxis", "Gemeinschaftspraxis"]),
         (("zahn",), ["Zahnarztpraxis"]),
@@ -1426,10 +1465,50 @@ def _radar_business_queries(term: str) -> list[str]:
     ]
     for tokens, queries in rules:
         if any(token in value for token in tokens):
-            return queries[:2]
+            return queries
     # Für unbekannte Begriffe bleibt die Suche bewusst eng am Original.
     cleaned = _clean(term)
     return [cleaned] if cleaned else []
+
+def _radar_queries_for_region(term: str, city: str, focus: str) -> list[str]:
+    """Begrenzt API Kosten und verteilt Synonyme über Deutschland.
+
+    Normale Kampagnen behalten maximal zwei Maps Suchbegriffe. Die spezielle
+    Logopädie Rohsammlung nutzt pro Ort vier Varianten. Zwei Kernbegriffe sind
+    immer dabei, zwei weitere rotieren deterministisch nach Ortsname. Dadurch
+    werden nicht in jeder Stadt zwölf fast identische Maps Requests erzeugt.
+    """
+    queries = list(dict.fromkeys(_radar_business_queries(term)))
+    if focus != LOGOPAEDIE_RADAR_CAMPAIGN:
+        return queries[:2]
+    if len(queries) <= 4:
+        return queries
+
+    chosen = queries[:2]
+    digest = hashlib.sha1(_norm(city).encode("utf-8")).hexdigest()
+    start = int(digest[:8], 16) % len(queries)
+    cursor = start
+    while len(chosen) < 4:
+        candidate = queries[cursor % len(queries)]
+        if candidate not in chosen:
+            chosen.append(candidate)
+        cursor += 1
+    return chosen
+
+
+def _radar_place_key(company: str, city: str, address: str, website: str, reference: str) -> str:
+    """Eindeutige Maps Identität ohne gleichnamige Praxen bundesweit zu verschlucken."""
+    if reference:
+        return "ref:" + _norm(reference)
+    if website:
+        try:
+            host = (urlparse(website).hostname or "").lower().removeprefix("www.")
+        except Exception:
+            host = ""
+        if host:
+            return "web:" + host
+    return "name:" + _company_key(company) + "|" + _norm(address or city)
+
 
 def _term_matches_job(term: str, title: str, company: str = "", description: str = "") -> bool:
     """Verhindert breite API Treffer wie Software Architect bei Architekt."""
@@ -1672,7 +1751,7 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
             excluded["large_name"] += 1
             continue
 
-        company_data = stats.get(_company_key(company), {})
+        company_data = stats.get(_company_stats_key(job), {})
         profile = _small_business_profile(
             company=company,
             title=title,
@@ -1694,6 +1773,9 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
             excluded["oversize"] += 1
             continue
         if focus == "Testpilot Therapie 500" and profile["segment"] != "Therapiepraxis":
+            excluded["focus"] += 1
+            continue
+        if focus == LOGOPAEDIE_RADAR_CAMPAIGN and profile["segment"] != "Therapiepraxis":
             excluded["focus"] += 1
             continue
         if focus == "Montagswelle 500 | Testpilot Fachkräfte":
@@ -1871,6 +1953,7 @@ def scan_jobs(
             terms, regions, serpapi_key, diagnostics,
             max_pages=max_pages,
             probe_limit_per_query=0,
+            focus=focus,
         ))
     filtered = score_and_filter(jobs, diagnostics, focus=focus)
     diagnostics.append(f"Gesamt: {len(filtered)} priorisierte Direktkunden Stellen für {focus} aus {len(sources)} aktivierten Quellen am {date.today().isoformat()}.")

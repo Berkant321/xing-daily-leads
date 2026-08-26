@@ -57,7 +57,15 @@ st.set_page_config(
 )
 
 
+LOGOPAEDIE_RADAR_CAMPAIGN = "Logopädie Radar Deutschland"
+
+
 CAMPAIGN_PRESETS = {
+    LOGOPAEDIE_RADAR_CAMPAIGN: [
+        # Ein Discovery Begriff. scanner.py erzeugt daraus je Region rotierende
+        # Google Maps Synonyme. Dadurch entstehen keine 15 fast identischen Tasks.
+        "Logopädie",
+    ],
     "Diamanten Radar | kleine Direktkunden": [
         # Firmenradar: Nicht nur offene Stellen suchen, sondern lokale Betriebe direkt finden
         # und deren eigene Websites sowie Karrierebereiche analysieren.
@@ -213,13 +221,236 @@ TESTPILOT_THERAPY_REGIONS = [
     ("Münster", 100), ("Bielefeld", 100),
 ]
 
+# Deutschlandweit deutlich dichter als die bisherigen 25 Großradien.
+# 30 km halten die Google Maps Ergebnislisten lokal und reduzieren das Problem,
+# dass bei 100 bis 150 km nur die prominentesten Treffer sichtbar werden.
+LOGOPAEDIE_RADAR_CITIES = [
+    'Kiel',
+    'Lübeck',
+    'Flensburg',
+    'Neumünster',
+    'Norderstedt',
+    'Elmshorn',
+    'Pinneberg',
+    'Itzehoe',
+    'Rendsburg',
+    'Schleswig',
+    'Husum',
+    'Heide',
+    'Eutin',
+    'Bad Segeberg',
+    'Ahrensburg',
+    'Hamburg',
+    'Bremen',
+    'Bremerhaven',
+    'Hannover',
+    'Braunschweig',
+    'Oldenburg',
+    'Osnabrück',
+    'Wolfsburg',
+    'Göttingen',
+    'Hildesheim',
+    'Salzgitter',
+    'Wilhelmshaven',
+    'Delmenhorst',
+    'Lüneburg',
+    'Celle',
+    'Hameln',
+    'Cuxhaven',
+    'Stade',
+    'Buxtehude',
+    'Verden',
+    'Nienburg',
+    'Cloppenburg',
+    'Vechta',
+    'Meppen',
+    'Nordhorn',
+    'Emden',
+    'Aurich',
+    'Leer',
+    'Goslar',
+    'Köln',
+    'Düsseldorf',
+    'Dortmund',
+    'Essen',
+    'Duisburg',
+    'Bochum',
+    'Wuppertal',
+    'Bielefeld',
+    'Bonn',
+    'Münster',
+    'Gelsenkirchen',
+    'Mönchengladbach',
+    'Aachen',
+    'Krefeld',
+    'Oberhausen',
+    'Hagen',
+    'Hamm',
+    'Mülheim an der Ruhr',
+    'Leverkusen',
+    'Solingen',
+    'Herne',
+    'Neuss',
+    'Paderborn',
+    'Recklinghausen',
+    'Bottrop',
+    'Remscheid',
+    'Moers',
+    'Siegen',
+    'Gütersloh',
+    'Iserlohn',
+    'Düren',
+    'Ratingen',
+    'Marl',
+    'Lüdenscheid',
+    'Bergisch Gladbach',
+    'Troisdorf',
+    'Detmold',
+    'Minden',
+    'Wesel',
+    'Kleve',
+    'Bocholt',
+    'Rheine',
+    'Ahlen',
+    'Arnsberg',
+    'Soest',
+    'Frankfurt am Main',
+    'Wiesbaden',
+    'Kassel',
+    'Darmstadt',
+    'Offenbach am Main',
+    'Hanau',
+    'Gießen',
+    'Marburg',
+    'Fulda',
+    'Rüsselsheim am Main',
+    'Bad Homburg',
+    'Wetzlar',
+    'Limburg an der Lahn',
+    'Bensheim',
+    'Mainz',
+    'Ludwigshafen am Rhein',
+    'Koblenz',
+    'Trier',
+    'Kaiserslautern',
+    'Worms',
+    'Neuwied',
+    'Speyer',
+    'Landau in der Pfalz',
+    'Bad Kreuznach',
+    'Pirmasens',
+    'Zweibrücken',
+    'Andernach',
+    'Saarbrücken',
+    'Neunkirchen Saar',
+    'Homburg Saar',
+    'Saarlouis',
+    'Stuttgart',
+    'Mannheim',
+    'Karlsruhe',
+    'Freiburg im Breisgau',
+    'Heidelberg',
+    'Heilbronn',
+    'Ulm',
+    'Pforzheim',
+    'Reutlingen',
+    'Esslingen am Neckar',
+    'Ludwigsburg',
+    'Tübingen',
+    'Villingen Schwenningen',
+    'Konstanz',
+    'Aalen',
+    'Offenburg',
+    'Friedrichshafen',
+    'Baden Baden',
+    'Lörrach',
+    'Schwäbisch Gmünd',
+    'Göppingen',
+    'Sindelfingen',
+    'München',
+    'Nürnberg',
+    'Augsburg',
+    'Regensburg',
+    'Ingolstadt',
+    'Würzburg',
+    'Fürth',
+    'Erlangen',
+    'Bamberg',
+    'Bayreuth',
+    'Landshut',
+    'Aschaffenburg',
+    'Kempten Allgäu',
+    'Rosenheim',
+    'Passau',
+    'Schweinfurt',
+    'Hof',
+    'Freising',
+    'Dachau',
+    'Memmingen',
+    'Straubing',
+    'Deggendorf',
+    'Amberg',
+    'Coburg',
+    'Ansbach',
+    'Weiden in der Oberpfalz',
+    'Garmisch Partenkirchen',
+    'Berlin',
+    'Potsdam',
+    'Cottbus',
+    'Brandenburg an der Havel',
+    'Frankfurt Oder',
+    'Oranienburg',
+    'Eberswalde',
+    'Bernau bei Berlin',
+    'Königs Wusterhausen',
+    'Neuruppin',
+    'Rostock',
+    'Schwerin',
+    'Neubrandenburg',
+    'Stralsund',
+    'Greifswald',
+    'Wismar',
+    'Güstrow',
+    'Leipzig',
+    'Dresden',
+    'Chemnitz',
+    'Zwickau',
+    'Plauen',
+    'Görlitz',
+    'Freiberg Sachsen',
+    'Bautzen',
+    'Pirna',
+    'Riesa',
+    'Magdeburg',
+    'Halle Saale',
+    'Dessau Roßlau',
+    'Lutherstadt Wittenberg',
+    'Halberstadt',
+    'Stendal',
+    'Merseburg',
+    'Quedlinburg',
+    'Erfurt',
+    'Jena',
+    'Gera',
+    'Weimar',
+    'Gotha',
+    'Eisenach',
+    'Nordhausen',
+    'Suhl',
+    'Mühlhausen Thüringen',
+]
+LOGOPAEDIE_RADAR_REGIONS = [(city, 30) for city in LOGOPAEDIE_RADAR_CITIES]
+
+
 CAMPAIGN_REGIONS = {
+    LOGOPAEDIE_RADAR_CAMPAIGN: LOGOPAEDIE_RADAR_REGIONS,
     "Diamanten Radar | kleine Direktkunden": MONDAY_WAVE_REGIONS,
     "Montagswelle 500 | Testpilot Fachkräfte": MONDAY_WAVE_REGIONS,
     "Testpilot Therapie 500": TESTPILOT_THERAPY_REGIONS,
 }
 
 CAMPAIGN_TARGETS = {
+    LOGOPAEDIE_RADAR_CAMPAIGN: 3000,
     "Diamanten Radar | kleine Direktkunden": 500,
     "Montagswelle 500 | Testpilot Fachkräfte": 500,
     "Testpilot Therapie 500": 500,
@@ -280,7 +511,7 @@ def _google_config_signature() -> str:
         client_email,
     ])
 
-KMU_SCHEMA_VERSION = "11.2.0"
+KMU_SCHEMA_VERSION = "11.3.0"
 
 
 def exclusive_invitation_subject(company: Any) -> str:
@@ -1444,6 +1675,8 @@ if page == "Daily Leads":
                 label = "versandbereiten, Salesforce sauberen Accounts"
             elif campaign == "Diamanten Radar | kleine Direktkunden":
                 label = "qualifizierten Radar Kandidaten"
+            elif campaign == LOGOPAEDIE_RADAR_CAMPAIGN:
+                label = "eindeutigen Logopädie Rohfunden"
             else:
                 label = "neuen Firmen vorbereitet"
             st.progress(target_ratio, text=f"Wellenziel: {campaign_ready_count} von {campaign_target} {label}")
@@ -1463,6 +1696,11 @@ if page == "Daily Leads":
                     "Das Firmenradar zählt kleine neue Direktkunden mit belastbaren Firmensignalen. "
                     "Eine offene Stelle wird nur behauptet, wenn sie auf einer echten Quelle gefunden wurde."
                 )
+            elif campaign == LOGOPAEDIE_RADAR_CAMPAIGN:
+                st.caption(
+                    "Diese Kampagne sammelt zuerst deutschlandweit Logopädie und Sprachtherapie Praxen als Rohfunde. "
+                    "Eine offene Stelle, E Mail oder ein Ansprechpartner ist in Schritt 1 ausdrücklich keine Voraussetzung."
+                )
             else:
                 st.caption(
                     "Diese Welle priorisiert kleine Physio, Ergo und Logopädie Praxen mit aktuellem Personalbedarf. "
@@ -1481,21 +1719,23 @@ if page == "Daily Leads":
         )
 
         is_diamond_wave = campaign == "Diamanten Radar | kleine Direktkunden"
+        is_logopaedie_radar = campaign == LOGOPAEDIE_RADAR_CAMPAIGN
+        is_radar_only_wave = is_diamond_wave or is_logopaedie_radar
         source_columns = st.columns(5)
         use_radar = source_columns[0].checkbox(
             "Google Firmenradar",
-            value=bool(serpapi_key) and is_diamond_wave,
+            value=bool(serpapi_key) and is_radar_only_wave,
             key=f"source_radar_v11_{campaign}",
             help="Findet lokale Unternehmen über Google Maps und prüft vorhandene Websites auf Karriere und Recruiting Signale.",
         )
         use_ba = source_columns[1].checkbox(
-            "Bundesagentur", value=not is_diamond_wave, key=f"source_ba_v11_{campaign}"
+            "Bundesagentur", value=not is_radar_only_wave, key=f"source_ba_v11_{campaign}"
         )
         use_google = source_columns[2].checkbox(
-            "Google Jobs", value=bool(serpapi_key) and not is_diamond_wave, key=f"source_google_v11_{campaign}"
+            "Google Jobs", value=bool(serpapi_key) and not is_radar_only_wave, key=f"source_google_v11_{campaign}"
         )
         use_adzuna = source_columns[3].checkbox(
-            "Adzuna", value=bool(adzuna_app_id and adzuna_api_key) and not is_diamond_wave, key=f"source_adzuna_v11_{campaign}"
+            "Adzuna", value=bool(adzuna_app_id and adzuna_api_key) and not is_radar_only_wave, key=f"source_adzuna_v11_{campaign}"
         )
         use_careers = source_columns[4].checkbox(
             "Manuelle Karriereseiten", value=False, key=f"source_careers_v11_{campaign}"
@@ -1504,6 +1744,11 @@ if page == "Daily Leads":
             st.caption(
                 "Empfohlen: zuerst nur Google Firmenradar. Dadurch suchst du bewusst außerhalb der üblichen Stellenbörsen. "
                 "Jede gefundene Firmenwebsite wird auf Karriere und Recruiting Signale geprüft und anschließend in Schritt 2 vertieft."
+            )
+        elif is_logopaedie_radar:
+            st.caption(
+                "Empfohlen: nur Google Firmenradar aktiv lassen. Die Rohsammlung nutzt einen dichten Deutschland Raster "
+                "und verteilt mehrere Logopädie und Sprachtherapie Suchvarianten über die Regionen. Tiefenrecherche folgt in Schritt 2."
             )
 
         career_urls_text = st.text_area(
@@ -1523,13 +1768,13 @@ if page == "Daily Leads":
             "Veröffentlicht seit Tagen", 1, 30, 14, key=f"days_v10_{campaign}"
         )
         max_pages = settings_columns[1].number_input(
-            "Seiten je Suche", 1, 5, 1 if is_diamond_wave else (2 if is_testpilot_wave else 1), key=f"pages_v11_{campaign}"
+            "Seiten je Suche", 1, 5, 1 if (is_diamond_wave or is_logopaedie_radar) else (2 if is_testpilot_wave else 1), key=f"pages_v11_{campaign}"
         )
         task_batch_size = settings_columns[2].number_input(
-            "Suchaufgaben pro Klick", 1, 30, 6 if is_diamond_wave else (12 if is_testpilot_wave else 4), key=f"task_batch_v11_{campaign}"
+            "Suchaufgaben pro Klick", 1, 30, 10 if is_logopaedie_radar else (6 if is_diamond_wave else (12 if is_testpilot_wave else 4)), key=f"task_batch_v11_{campaign}"
         )
         region_batch_size = settings_columns[3].number_input(
-            "Regionen je Suchaufgabe", 1, 8, 3 if is_diamond_wave else (4 if is_testpilot_wave else 3), key=f"region_batch_v11_{campaign}"
+            "Regionen je Suchaufgabe", 1, 8, 3 if (is_diamond_wave or is_logopaedie_radar) else (4 if is_testpilot_wave else 3), key=f"region_batch_v11_{campaign}"
         )
 
         all_terms = [line.strip() for line in terms_text.splitlines() if line.strip()]
@@ -1563,6 +1808,12 @@ if page == "Daily Leads":
             "Jeder Klick verteilt die Suche auf unterschiedliche Berufsgruppen und kleine Regionspakete. "
             "Nach einem Neustart wird bei der nächsten offenen Kombination fortgesetzt. Kontakte folgen in Schritt 2."
         )
+        if is_logopaedie_radar:
+            total_region_groups = (len(preview_regions) + int(region_batch_size) - 1) // int(region_batch_size) if preview_regions else 0
+            st.caption(
+                f"Logopädie Raster: {len(preview_regions)} lokale Startpunkte, ungefähr {total_region_groups} Suchaufgaben. "
+                "Pro Ort werden vier rotierende Maps Suchvarianten genutzt. Eine Seite je Suche ist für die Rohsammlung der Standard."
+            )
 
         uploaded = st.file_uploader(
             "Optionaler Salesforce Export, vorhandene Firmen werden ausgeschlossen",
@@ -1714,7 +1965,13 @@ if page == "Daily Leads":
                     )
                     eligible_jobs = [
                         job for job in parsed_jobs
-                        if not crm_match(clean_text(job.get("company", "")), exclusions)
+                        if not crm_match(
+                            clean_text(job.get("company", "")),
+                            exclusions,
+                            website=clean_text(job.get("website", "")),
+                            email=clean_text(job.get("email", "")),
+                            phone=clean_text(job.get("phone", "")),
+                        )
                     ]
                     fresh_job_rows = build_job_rows(
                         eligible_jobs,
