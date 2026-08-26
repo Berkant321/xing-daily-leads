@@ -1347,12 +1347,15 @@ def research_candidate_indices(frame: pd.DataFrame, limit: int) -> list[int]:
     score = pd.to_numeric(frame["lead_score"], errors="coerce").fillna(0)
     needs = (
         (frame["website"] == "")
+        | (frame["ansprechpartner"] == "")
         | ((frame["email"] == "") & (frame["telefon"] == ""))
         | (frame["research_status"].isin(["", "offen", "nicht gefunden", "Fehler"]))
     )
+    error_text = (frame["last_error"].astype(str) + " " + frame["research_notes"].astype(str)).str.lower()
+    old_limit_failure = error_text.str.contains("429|quota|rate limit", regex=True, na=False)
     candidates = frame[
         needs
-        & (attempts < 3)
+        & ((attempts < 3) | old_limit_failure)
         & (~frame["status"].isin(["Ausschließen", "In Salesforce übernommen"]))
         & (frame["crm_status"] != "Bereits in Salesforce")
         & (frame["size_fit"] != "Groß oder unpassend")
@@ -1375,6 +1378,7 @@ def enrich_lead(
     serpapi_key: str,
 ) -> tuple[dict[str, str], list[str]]:
     item = migrate_frame(pd.DataFrame([row])).iloc[0].to_dict()
+    previous_content_hash = clean_text(item.get("content_hash", ""))
     city = split_pipe(item.get("orte", ""))[0] if split_pipe(item.get("orte", "")) else ""
     source_urls = unique([
         item.get("website", ""), item.get("stellenlink", ""),
@@ -1449,7 +1453,15 @@ def enrich_lead(
         reasons = unique([item.get("diamond_reason", ""), career_signal, "Website Recherche abgeschlossen" if item.get("website") else ""])
         item["diamond_reason"] = "; ".join(reasons[:4])
     item["email_quality"] = classify_email_quality(item.get("email", ""))[0]
-    item["research_attempts"] = str(attempts)
+    research_note_low = clean_text(item.get("research_notes", "")).lower()
+    limited_external_service = (
+        "429" in research_note_low
+        or "quota" in research_note_low
+        or "rate limit" in research_note_low
+    )
+    # Temporäre externe Limits sind kein echter Fehlversuch des Datensatzes.
+    # Dadurch bleiben Leads nach Wiederherstellung der Dienste recherchierbar.
+    item["research_attempts"] = str(max(0, attempts - 1) if limited_external_service else attempts)
     item["research_updated_at"] = now
     item["pipeline_stage"] = "Recherchiert" if item.get("website") or item.get("email") or item.get("telefon") else "Recherche versucht"
     item["last_error"] = "" if item["pipeline_stage"] == "Recherchiert" else item["research_notes"]
@@ -1490,7 +1502,17 @@ def enrich_lead(
     item["hot_status"] = status
     item["lead_score"] = str(score)
     item["warum_hot"] = reason
-    item["content_hash"] = facts_hash(item["firma"], jobs, benefits, research)
+    new_content_hash = facts_hash(item["firma"], jobs, benefits, research)
+    item["content_hash"] = new_content_hash
+    if (
+        previous_content_hash
+        and previous_content_hash != new_content_hash
+        and item.get("text_locked") != "ja"
+        and item.get("erstmail")
+    ):
+        # Neue Recherche Fakten machen den vorhandenen Text potentiell veraltet.
+        # Der Text bleibt sichtbar, wird aber wieder für Schritt 3 eingeplant.
+        item["ai_status"] = "Recherche aktualisiert: Text neu erzeugen"
     quality_score, quality_status, quality_notes = evaluate_lead_quality(item)
     item["quality_score"] = str(quality_score)
     item["quality_status"] = quality_status
@@ -1510,7 +1532,19 @@ def ai_candidate_indices(frame: pd.DataFrame, limit: int, force: bool = False) -
     if force:
         needs = frame["text_locked"] != "ja"
     else:
-        needs = (~frame["ai_status"].str.startswith("KI erstellt", na=False)) & (frame["text_locked"] != "ja")
+        # Ein sauber erzeugter Fallback ist ein fertiger Text und darf nicht bei
+        # jedem Lauf erneut gegen ein erschöpftes OpenAI Kontingent geschickt werden.
+        has_assets = (
+            frame["erstmail"].astype(str).str.strip().ne("")
+            & frame["personalization_evidence"].astype(str).str.strip().ne("")
+        )
+        completed = (
+            frame["ai_status"].str.startswith("KI erstellt", na=False)
+            | frame["ai_status"].str.startswith("Fallback erstellt", na=False)
+            | (frame["ai_status"].str.startswith("Fallback nach KI Fehler", na=False) & has_assets)
+            | (frame["ai_status"].eq("Fallback genutzt") & has_assets)
+        )
+        needs = (~completed) & (frame["text_locked"] != "ja")
     candidates = frame[
         needs
         & (attempts < 3)
@@ -1601,8 +1635,9 @@ def generate_lead_assets(
     item["ai_status"] = clean_text(texts.get("ai_status", "")) or "Fallback genutzt"
     item["ai_attempts"] = str(attempts)
     item["ai_updated_at"] = now
-    item["pipeline_stage"] = "Texte erstellt" if item["ai_status"].startswith("KI erstellt") else "Text Fallback"
-    item["last_error"] = "" if item["pipeline_stage"] == "Texte erstellt" else item["ai_status"]
+    text_completed = item["ai_status"].startswith("KI erstellt") or item["ai_status"].startswith("Fallback erstellt")
+    item["pipeline_stage"] = "Texte erstellt" if text_completed else "Text Fallback"
+    item["last_error"] = "" if text_completed else item["ai_status"]
     item["content_hash"] = facts_hash(item["firma"], jobs, benefits, research)
     quality_score, quality_status, quality_notes = evaluate_lead_quality(item)
     item["quality_score"] = str(quality_score)

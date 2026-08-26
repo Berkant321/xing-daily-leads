@@ -17,6 +17,21 @@ from urllib3.util.retry import Retry
 
 _EXTRACT = tldextract.TLDExtract(suffix_list_urls=None)
 
+# Prozessweiter Schutz vor verbrannten SerpApi Requests. Sobald 429 kommt,
+# wird SerpApi in der laufenden Streamlit Instanz kurz pausiert. Die kostenlose
+# Recherche und direkte Website Prüfung laufen weiter.
+_SERPAPI_PAUSED_UNTIL = 0.0
+_SERPAPI_PAUSE_SECONDS = 15 * 60
+
+
+def _serpapi_is_paused() -> bool:
+    return time.monotonic() < _SERPAPI_PAUSED_UNTIL
+
+
+def _pause_serpapi() -> None:
+    global _SERPAPI_PAUSED_UNTIL
+    _SERPAPI_PAUSED_UNTIL = max(_SERPAPI_PAUSED_UNTIL, time.monotonic() + _SERPAPI_PAUSE_SECONDS)
+
 BROWSER_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -180,7 +195,7 @@ def _session() -> requests.Session:
         connect=2,
         read=2,
         backoff_factor=0.35,
-        status_forcelist=(429, 500, 502, 503, 504),
+        status_forcelist=(500, 502, 503, 504),
         allowed_methods=("GET",),
         raise_on_status=False,
     )
@@ -310,10 +325,15 @@ def _search_candidates_serpapi(
 ) -> list[dict[str, str]]:
     if not api_key:
         return []
+    if _serpapi_is_paused():
+        errors.append("SerpApi: nach HTTP 429 vorübergehend pausiert")
+        return []
+    # SerpApi ist kostenpflichtig und 429 bedeutet hier häufig ein erschöpftes
+    # Kontingent. Deshalb maximal zwei gezielte Suchen und beim ersten 429 sofort
+    # abbrechen. DuckDuckGo und Domainprüfung übernehmen danach den Fallback.
     queries = [
-        f'"{company}" {city} offizielle Website Kontakt'.strip(),
-        f'"{company}" {city} Impressum Telefonnummer E Mail'.strip(),
-        f'"{company}" {city} Personal Recruiting HR Geschäftsführer Ansprechpartner'.strip(),
+        f'"{company}" {city} offizielle Website Kontakt Impressum'.strip(),
+        f'"{company}" {city} Personal Recruiting Geschäftsführer'.strip(),
     ]
     candidates: list[dict[str, str]] = []
     for query in queries:
@@ -324,7 +344,13 @@ def _search_candidates_serpapi(
             timeout=30,
         )
         if error or not response:
-            errors.append(f"SerpApi: {error or 'keine Antwort'}")
+            message = error or "keine Antwort"
+            errors.append(f"SerpApi: {message}")
+            low = message.lower()
+            if "429" in low or "quota" in low or "limit" in low:
+                # Nicht weiter gegen ein leeres Kontingent feuern.
+                _pause_serpapi()
+                break
             continue
         try:
             payload = response.json()
@@ -496,9 +522,12 @@ def discover_official_website(
         if source and not is_blocked_url(source):
             records.append(_candidate_record(homepage_from_url(source), context=company, source="Stellenlink"))
 
-    records.extend(_search_candidates_serpapi(session, company, city, serpapi_key, errors))
-    if len(records) < 3:
+    # Kostenlose Suche zuerst. SerpApi wird nur noch als zweite Stufe genutzt,
+    # wenn Stellenlink, bekannte Domain und DuckDuckGo nicht genug liefern.
+    if len(records) < 2:
         records.extend(_search_candidates_duckduckgo(session, company, city, errors))
+    if len(records) < 2:
+        records.extend(_search_candidates_serpapi(session, company, city, serpapi_key, errors))
 
     # Suchtreffer von XING und LinkedIn werden nicht gecrawlt, ihre öffentlichen
     # Titel und Snippets helfen aber bei Ansprechpartnern und Rollen.

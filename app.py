@@ -280,7 +280,7 @@ def _google_config_signature() -> str:
         client_email,
     ])
 
-KMU_SCHEMA_VERSION = "10.4.0"
+KMU_SCHEMA_VERSION = "11.2.0"
 
 
 def exclusive_invitation_subject(company: Any) -> str:
@@ -288,15 +288,25 @@ def exclusive_invitation_subject(company: Any) -> str:
     return f"Exklusive Einladung | {company_text}" if company_text else "Exklusive Einladung"
 
 
+def expected_subject(row: pd.Series | dict[str, Any]) -> str:
+    discovery_kind = clean_text(row.get("discovery_kind", ""))
+    titles = clean_text(row.get("job_titles", ""))
+    if discovery_kind == "Firmenradar" and not titles:
+        return "Frage zur Personalgewinnung"
+    return exclusive_invitation_subject(row.get("firma", ""))
+
+
 def ensure_exclusive_subjects(frame: pd.DataFrame | None) -> tuple[pd.DataFrame, bool]:
+    # Historischer Funktionsname bleibt für Kompatibilität erhalten. Inhaltlich
+    # wird jetzt der zur Leadart passende Betreff gesetzt.
     result = frame.copy() if frame is not None else pd.DataFrame()
     if result.empty or "firma" not in result.columns:
         return result, False
     if "erstmail_betreff" not in result.columns:
         result["erstmail_betreff"] = ""
     changed = False
-    for index, company in result["firma"].items():
-        target = exclusive_invitation_subject(company)
+    for index, row in result.iterrows():
+        target = expected_subject(row)
         if target and clean_text(result.at[index, "erstmail_betreff"]) != target:
             result.at[index, "erstmail_betreff"] = target
             changed = True
@@ -1281,7 +1291,7 @@ serpapi_key = str(st.secrets.get("serpapi_key", "")).strip()
 adzuna_app_id = str(st.secrets.get("adzuna_app_id", "")).strip()
 adzuna_api_key = str(st.secrets.get("adzuna_api_key", "")).strip()
 
-st.sidebar.title("XING Daily Leads V11.1")
+st.sidebar.title("XING Daily Leads V11.2")
 page = st.sidebar.radio(
     "Bereich",
     ["Daily Leads", "Stellen", "Kampagnen Feedback", "Follow ups", "Alle Leads", "Salesforce Abgleich", "CRM Ausschluss"],
@@ -1870,7 +1880,7 @@ if page == "Daily Leads":
             key="research_only_latest_v10",
             disabled=not bool(latest_search_scan),
         )
-        research_limit = st.number_input("Firmen pro Recherchepaket", 1, 100, 20, key="research_limit_v10")
+        research_limit = st.number_input("Firmen pro Recherchepaket", 1, 50, 10, key="research_limit_v10")
         research_available = research_all_latest if research_only_latest else research_all_global
         if st.button("Schritt 2 starten", disabled=not research_available, key="start_research_v10"):
             indices = _candidate_indices_for_scope(
@@ -1966,11 +1976,11 @@ if page == "Daily Leads":
                     api_key=openai_api_key,
                     model=openai_model,
                 )
-                updated["erstmail_betreff"] = exclusive_invitation_subject(company)
+                updated["erstmail_betreff"] = expected_subject(updated)
                 for column in COLUMNS:
                     frame.loc[index, column] = updated.get(column, frame.loc[index, column])
                 persist_rows(frame.loc[[index]], frame)
-                if frame.loc[index, "ai_status"].startswith("KI erstellt"):
+                if frame.loc[index, "ai_status"].startswith(("KI erstellt", "Fallback erstellt")):
                     ai_created += 1
                 details.extend(diagnostics)
             progress.empty()
@@ -1979,10 +1989,10 @@ if page == "Daily Leads":
                 stage="Texte",
                 status="fertig",
                 processed_items=str(len(indices)),
-                message=f"KI Texte {ai_created}, Fallbacks {len(indices) - ai_created}.",
+                message=f"Fertige Texte {ai_created}, offene oder alte Fallbacks {len(indices) - ai_created}.",
             )
             st.session_state["last_pipeline_details"] = details
-            st.success(f"Textpaket abgeschlossen: {ai_created} KI Texte, {len(indices) - ai_created} Fallbacks.")
+            st.success(f"Textpaket abgeschlossen: {ai_created} fertige Texte, {len(indices) - ai_created} offene oder alte Fallbacks.")
 
     with st.expander("Technische Details und Scan Verlauf", expanded=False):
         details = st.session_state.get("last_pipeline_details", [])

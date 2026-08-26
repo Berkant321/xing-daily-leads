@@ -281,7 +281,7 @@ def _session() -> requests.Session:
         connect=2,
         read=2,
         backoff_factor=0.3,
-        status_forcelist=(429, 500, 502, 503, 504),
+        status_forcelist=(500, 502, 503, 504),
         allowed_methods=("GET",),
         raise_on_status=False,
     )
@@ -615,6 +615,10 @@ def scan_google_jobs(
                 request_count += 1
                 if error:
                     diagnostics.append(f"Google Jobs {term} · {city}: {error}")
+                    low = error.lower()
+                    if "429" in low or "quota" in low or "limit" in low:
+                        diagnostics.append("Google Jobs: SerpApi Limit erkannt. Quelle für diesen Lauf gestoppt, andere Quellen laufen weiter.")
+                        return jobs
                     break
                 try:
                     payload = response.json() if response else {}
@@ -1121,7 +1125,12 @@ def scan_google_company_radar(
                     response, error = _get("https://serpapi.com/search.json", params=params, timeout=35)
                     request_count += 1
                     if error or not response:
-                        diagnostics.append(f"Google Firmenradar {business_query} · {city}: {error or 'keine Antwort'}")
+                        message = error or "keine Antwort"
+                        diagnostics.append(f"Google Firmenradar {business_query} · {city}: {message}")
+                        low = message.lower()
+                        if "429" in low or "quota" in low or "limit" in low:
+                            diagnostics.append("Google Firmenradar: SerpApi Limit erkannt. Radar für diesen Lauf gestoppt, bereits gefundene Firmen bleiben erhalten.")
+                            return output
                         break
                     try:
                         payload = response.json()

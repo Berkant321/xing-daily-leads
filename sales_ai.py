@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from typing import Any
 
 try:
@@ -55,6 +56,18 @@ MONDAY_REQUIRED_PHRASES = (
     "Klingt",
 )
 
+_OPENAI_PAUSED_UNTIL = 0.0
+_OPENAI_PAUSE_SECONDS = 10 * 60
+
+
+def _openai_is_paused() -> bool:
+    return time.monotonic() < _OPENAI_PAUSED_UNTIL
+
+
+def _pause_openai() -> None:
+    global _OPENAI_PAUSED_UNTIL
+    _OPENAI_PAUSED_UNTIL = max(_OPENAI_PAUSED_UNTIL, time.monotonic() + _OPENAI_PAUSE_SECONDS)
+
 
 def openai_available() -> bool:
     return OpenAI is not None
@@ -81,9 +94,10 @@ def _clean_multiline(value: Any) -> str:
 
 
 def _no_customer_hyphens(text: str) -> str:
-    # Kundentexte enthalten keine Gedankenstriche oder Bindestriche.
-    text = re.sub(r"\s*[–—]\s*", " ", text)
-    text = re.sub(r"(?<!\w)-(?!\w)", " ", text)
+    # Kundentexte enthalten keinerlei Bindestriche oder Gedankenstriche.
+    # E Mail Adressen und URLs werden nicht in Kundentexte geschrieben, daher kann
+    # auch der normale ASCII Bindestrich sicher entfernt werden.
+    text = re.sub(r"[–—-]+", " ", text)
     return re.sub(r" {2,}", " ", text).strip()
 
 
@@ -649,10 +663,13 @@ def create_sales_assets(
     else:
         fallback = _fallback_assets(company, jobs, benefits, person, research)
     if OpenAI is None:
-        fallback["ai_status"] = "Fallback: OpenAI Paket fehlt"
+        fallback["ai_status"] = "Fallback erstellt: OpenAI Paket fehlt"
         return fallback
     if not api_key:
-        fallback["ai_status"] = "Fallback: OpenAI Key fehlt"
+        fallback["ai_status"] = "Fallback erstellt: OpenAI Key fehlt"
+        return fallback
+    if _openai_is_paused():
+        fallback["ai_status"] = "Fallback erstellt: OpenAI nach 429 vorübergehend pausiert"
         return fallback
 
     cities: list[str] = []
@@ -767,7 +784,7 @@ Keine Markdown Formatierung.
 """
 
     try:
-        client = OpenAI(api_key=api_key, timeout=60.0, max_retries=1)
+        client = OpenAI(api_key=api_key, timeout=60.0, max_retries=0)
         response = client.responses.create(model=model, input=prompt)
         data = _extract_json_object(_response_text(response))
         result: dict[str, str] = {}
@@ -787,5 +804,14 @@ Keine Markdown Formatierung.
         result["ai_status"] = f"KI erstellt: {model}, {mail_source}"
         return result
     except Exception as exc:
-        fallback["ai_status"] = f"Fallback nach KI Fehler: {str(exc)[:180]}"
+        message = str(exc)[:240]
+        low = message.lower()
+        if "429" in low or "quota" in low or "insufficient_quota" in low or "rate limit" in low:
+            # Ein fehlendes Kontingent darf die Pipeline nicht blockieren. Der
+            # deterministische, faktenbasierte Text ist ein fertiges Ergebnis und
+            # kann später optional erneut mit KI veredelt werden.
+            _pause_openai()
+            fallback["ai_status"] = "Fallback erstellt: OpenAI Kontingent aktuell nicht verfügbar"
+        else:
+            fallback["ai_status"] = f"Fallback erstellt: KI Fehler {message}"
         return fallback
