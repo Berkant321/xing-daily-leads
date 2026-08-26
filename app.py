@@ -10,8 +10,8 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-import pipeline as pipeline_module
-from pipeline import (
+import xing_pipeline as pipeline_module
+from xing_pipeline import (
     ASSET_KEYS,
     COLUMNS,
     JOB_COLUMNS,
@@ -1661,6 +1661,11 @@ if page == "Daily Leads":
                     f"{campaign_marker} Suchrunde gestartet. "
                     f"{completed_task_count} Aufgaben waren vorher abgeschlossen, {blocked_task_count} blockiert."
                 ),
+            )
+            st.info(
+                "Aktuelle Suche läuft. Die bereits sichtbare Leadliste stammt bis zum ersten gespeicherten "
+                "Suchpaket noch aus dem vorherigen Lauf. Schritt 1 prüft jetzt keine Websites mehr tief, "
+                "damit neue Firmen schnell gespeichert werden. Die Tiefenrecherche erfolgt ausschließlich in Schritt 2."
             )
 
             progress = st.progress(0, text="Suchrunde startet.")

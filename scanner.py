@@ -1863,10 +1863,14 @@ def scan_jobs(
     if "Karriereseiten" in sources:
         jobs.extend(scan_career_urls(career_urls or [], diagnostics))
     if "Google Firmenradar" in sources:
+        # Schritt 1 ist ausschließlich Discovery. Website, Karrierebereich,
+        # Ansprechpartner und E Mail gehören in Schritt 2. Frühere Versionen
+        # prüften hier bis zu acht Websites pro Maps Anfrage und blockierten
+        # dadurch minutenlang, bevor auch nur eine neue Firma gespeichert wurde.
         jobs.extend(scan_google_company_radar(
             terms, regions, serpapi_key, diagnostics,
             max_pages=max_pages,
-            probe_limit_per_query=8,
+            probe_limit_per_query=0,
         ))
     filtered = score_and_filter(jobs, diagnostics, focus=focus)
     diagnostics.append(f"Gesamt: {len(filtered)} priorisierte Direktkunden Stellen für {focus} aus {len(sources)} aktivierten Quellen am {date.today().isoformat()}.")
