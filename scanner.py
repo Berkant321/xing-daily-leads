@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import re
 import time
@@ -13,8 +12,6 @@ import requests
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-
-LOGOPAEDIE_RADAR_CAMPAIGN = "Logopädie Radar Deutschland"
 
 BA_API_BASE = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service"
 HEADERS = {
@@ -133,6 +130,11 @@ EMPLOYER_SEGMENT_KEYWORDS = {
     "Gastronomie und Hotellerie": {
         "hotel", "restaurant", "gasthof", "gasthaus", "resort",
     },
+    "Soziales und Bildung": {
+        "kindergarten", "kita", "kindertagesstaette", "kindertagesstätte",
+        "jugendhilfe", "sozialwerk", "bildungszentrum", "bildungstraeger",
+        "schule", "foerderschule", "förderschule", "heilpaedagogik", "heilpädagogik",
+    },
 }
 
 THERAPY_NON_PRACTICE_SIGNALS = {
@@ -198,19 +200,24 @@ SEGMENT_KEYWORDS = {
     "Gastronomie und Hotellerie": {
         "gastronomie", "hotel", "restaurant", "koch", "küche", "rezeption", "servicekraft",
     },
+    "Soziales und Bildung": {
+        "erzieher", "sozialpädagog", "sozialpaedagog", "sozialarbeiter",
+        "heilerziehung", "heilpädagog", "heilpaedagog", "pädagog", "paedagog",
+        "kita", "kindergarten", "jugendhilfe",
+    },
     "Direktkunde": set(),
 }
 
 _ALL_SEGMENTS = set(SEGMENT_KEYWORDS)
 
 FOCUS_SEGMENTS = {
+    "Bedarfsradar Deutschland | alle Berufsgruppen": _ALL_SEGMENTS,
     "Montagswelle 500 | Testpilot Fachkräfte": {
         "Therapiepraxis", "Pflege und Medizin", "Handwerk und Technik",
         "Industrie und Produktion", "Bau und Engineering", "Steuer und Buchhaltung",
         "Logistik und Einkauf",
     },
     "Testpilot Therapie 500": {"Therapiepraxis"},
-    LOGOPAEDIE_RADAR_CAMPAIGN: {"Therapiepraxis"},
     "Breite Massenkampagne": _ALL_SEGMENTS,
     "Alle Direktkunden": _ALL_SEGMENTS,
     "Alle kleinen Direktkunden": _ALL_SEGMENTS,
@@ -256,6 +263,26 @@ TARGET_KEYWORDS = {
     "clinical research": 17, "apotheker": 17, "pta": 16,
     "personalreferent": 15, "recruiter": 15, "sachbearbeiter": 11,
     "assistenz": 11, "industriekaufmann": 12, "büromanagement": 11,
+    "gesundheits und krankenpfleger": 20, "altenpfleger": 20, "zahnmedizinische fachangestellte": 18,
+    "operationstechnischer assistent": 20, "anaesthesietechnischer assistent": 20,
+    "heilerziehungspfleger": 18, "erzieher": 17, "sozialpaedagog": 17, "sozialarbeiter": 17,
+    "kfz mechatroniker": 18, "maler": 15, "maurer": 16, "strassenbauer": 17,
+    "tiefbau": 17, "zimmerer": 16, "monteur": 15, "maschinen und anlagenfuehrer": 16,
+    "qualitaetspruefer": 15, "verfahrensmechaniker": 17, "polier": 17, "kalkulator": 17,
+    "maschinenbauingenieur": 16, "accountant": 15, "notarfachangestellte": 19,
+    "frontend": 15, "backend": 15, "full stack": 16, "cloud engineer": 16,
+    "cyber security": 17, "erp berater": 15, "vertriebsinnendienst": 14,
+    "technischer vertrieb": 16, "customer success": 14, "lkw fahrer": 15,
+    "speditionskaufmann": 16, "staplerfahrer": 13, "fuhrparkleiter": 15,
+    "supply chain": 14, "pharmakant": 17, "medizintechniker": 16,
+    "lohn und gehaltsbuchhalter": 15, "tiermedizinische fachangestellte": 18,
+    "paedagogische fachkraft": 17, "gaertner": 14, "landschaftsgaertner": 15,
+    "gebaeudereiniger": 13, "hausmeister": 12, "facility manager": 14,
+    "baecker": 15, "fleischer": 15, "augenoptiker": 16, "hoerakustiker": 17,
+    "qualitaetsmanager": 15, "schichtleiter produktion": 15, "fachlagerist": 14,
+    "immobilienkaufmann": 14, "immobilienverwalter": 14,
+    "koch": 14, "hotelfach": 14,
+    "restaurantfach": 14, "rezeption": 12, "verkaeufer": 12, "filialleiter": 14,
 }
 
 BUYING_SIGNALS = {
@@ -1106,12 +1133,13 @@ def scan_google_company_radar(
     candidate_count = 0
     page_limit = max(1, min(int(max_pages), 5))
     probe_limit = max(0, min(int(probe_limit_per_query), 20))
-    seen_places: set[str] = set()
+    seen_companies: set[str] = set()
 
     for term in terms:
+        business_queries = _radar_business_queries(term)
         for city, radius in regions:
-            business_queries = _radar_queries_for_region(term, city, focus)
-            for business_query in business_queries:
+            query_limit = 4 if focus == "Testpilot Therapie 500" else 2
+            for business_query in business_queries[:query_limit]:
                 for page in range(page_limit):
                     # Google Maps liefert bei sehr großen Kartenradien nur die relevantesten
                     # Treffer und nicht alle Betriebe im Kreis. Deshalb wird der Ortsname
@@ -1158,23 +1186,21 @@ def scan_google_company_radar(
                         if not company:
                             continue
                         company_key = _company_key(company)
-                        if not company_key:
+                        if not company_key or company_key in seen_companies:
                             continue
                         if _hit(company, STAFFING_KEYWORDS) or _hit(company, PUBLIC_KEYWORDS) or _hit(company, LARGE_COMPANY_KEYWORDS):
                             continue
+                        seen_companies.add(company_key)
                         address = _clean(item.get("address"))
                         phone = _clean(item.get("phone"))
                         website = _radar_website_from_local(item)
-                        reference = _clean(item.get("data_id") or item.get("place_id") or item.get("data_cid") or f"{company}:{city}:{address}")
-                        place_key = _radar_place_key(company, city, address, website, reference)
-                        if not place_key or place_key in seen_places:
-                            continue
-                        seen_places.add(place_key)
                         reviews_raw = item.get("reviews") or 0
                         try:
                             reviews = int(str(reviews_raw).replace(".", "").replace(",", ""))
                         except ValueError:
                             reviews = 0
+                        reference = _clean(item.get("data_id") or item.get("place_id") or item.get("data_cid") or f"{company}:{city}")
+
                         # Die ersten Treffer werden sofort auf Karrieresignale geprüft.
                         # Weitere Firmen werden trotzdem gespeichert und in Schritt 2 tief recherchiert.
                         if item_index < probe_limit and website:
@@ -1204,7 +1230,7 @@ def scan_google_company_radar(
                                 company=company,
                                 title="",
                                 city=city,
-                                description=f"Google Maps Firmenfund. Kategorie: {business_query}. {address}".strip(),
+                                description=f"Google Maps Firmenfund für {business_query}. {address}".strip(),
                                 url=website,
                                 phone=phone,
                                 source="Google Firmenradar",
@@ -1213,7 +1239,7 @@ def scan_google_company_radar(
                                 discovery_kind="Firmenradar",
                                 need_signal="Website und Karrierebedarf in Schritt 2 prüfen",
                                 website=website,
-                                evidence=f"Google Maps Firmenfund in {city}. Suchkategorie: {business_query}. {address}".strip(),
+                                evidence=f"Google Maps Firmenfund: {business_query} in {city}. {address}".strip(),
                                 diamond_score=diamond_score,
                                 diamond_reason=diamond_reason,
                             )]
@@ -1246,29 +1272,11 @@ def _company_key(company: str) -> str:
 
 
 def _dedup_key(job: dict) -> str:
-    if _clean(job.get("discovery_kind", "")) == "Firmenradar":
-        reference = _clean(job.get("reference", ""))
-        if reference:
-            return "radar|" + _norm(reference)
-        website = _clean(job.get("website", ""))
-        if website:
-            try:
-                host = (urlparse(website).hostname or "").lower().removeprefix("www.")
-            except Exception:
-                host = ""
-            if host:
-                return "radar|web|" + host
     return "|".join([
         _company_key(job.get("company", "")),
         re.sub(r"\W+", "", _norm(job.get("title", ""))),
         re.sub(r"\W+", "", _norm(job.get("city", ""))),
     ])
-
-
-def _company_stats_key(job: dict) -> str:
-    if _clean(job.get("discovery_kind", "")) == "Firmenradar":
-        return _dedup_key(job)
-    return _company_key(job.get("company", ""))
 
 
 def deduplicate(jobs: list[dict]) -> list[dict]:
@@ -1320,7 +1328,7 @@ def _weighted(text: str, mapping: dict[str, int]) -> tuple[int, list[str]]:
 def _company_stats(jobs: list[dict]) -> dict[str, dict]:
     grouped: dict[str, list[dict]] = {}
     for job in jobs:
-        grouped.setdefault(_company_stats_key(job), []).append(job)
+        grouped.setdefault(_company_key(job.get("company", "")), []).append(job)
     result = {}
     for key, items in grouped.items():
         result[key] = {
@@ -1389,60 +1397,92 @@ def _number_location_signal(text: str) -> int:
 
 def _segment_for_term(term: str) -> str:
     value = _norm(term)
-    if any(token in value for token in ("physio", "ergo", "logo", "therapie")):
+    if any(token in value for token in ("physio", "ergo", "logo", "therapie", "sprachtherap")):
         return "Therapiepraxis"
-    if any(token in value for token in ("pflege", "mfa", "medizin", "arzt", "zahn")):
+    if any(token in value for token in (
+        "pflege", "altenpfleg", "krankenpfleg", "mfa", "medizin", "arzt", "zahn",
+        "operationstechn", "anaesthesietechn", "tiermedizin"
+    )):
         return "Pflege und Medizin"
-    if any(token in value for token in ("steuer", "bilanzbuch", "lohnbuch", "finanzbuch")):
+    if any(token in value for token in ("erzieher", "paedagogische fachkraft", "sozialpaedagog", "sozialarbeit", "heilerziehung", "heilpaedagog", "paedagog")):
+        return "Soziales und Bildung"
+    if any(token in value for token in ("steuer", "bilanzbuch", "lohnbuch", "finanzbuch", "accountant", "controller")):
         return "Steuer und Buchhaltung"
     if any(token in value for token in ("rechtsanw", "notar", "legal", "jurist")):
         return "Recht und Kanzlei"
-    if any(token in value for token in ("elektr", "shk", "sanitaer", "heizung", "kaelte", "klima", "dach", "tischler", "schreiner", "metallbau")):
+    if any(token in value for token in (
+        "elektr", "shk", "sanitaer", "heizung", "kaelte", "klima", "dach", "tischler",
+        "schreiner", "metallbau", "kfz", "maler", "maurer", "strassenbau", "tiefbau",
+        "zimmerer", "servicetechn", "monteur", "gaertner", "landschaftsgaertner", "gebaeudereiniger", "hausmeister", "facility", "baecker", "fleischer", "augenoptiker", "hoerakustiker"
+    )):
         return "Handwerk und Technik"
-    if any(token in value for token in ("maschinenbau", "anlagenbau", "industriemechan", "zerspan", "cnc", "produktion", "mechatron")):
+    if any(token in value for token in (
+        "maschinenbau", "anlagenbau", "industriemechan", "zerspan", "cnc", "produktion",
+        "mechatron", "maschinenbedien", "werkzeugmechan", "instandhalt", "qualitaetspruef",
+        "verfahrensmechan", "anlagenfuehrer", "qualitaetsmanager", "schichtleiter produktion"
+    )):
         return "Industrie und Produktion"
-    if any(token in value for token in ("software", "devops", "systemadmin", "it admin", "fachinformat", "sap", "it dienst")):
+    if any(token in value for token in (
+        "software", "frontend", "backend", "full stack", "devops", "systemadmin", "it admin",
+        "it support", "fachinformat", "sap", "erp", "cloud", "data engineer", "cyber"
+    )):
         return "IT und Digitalisierung"
-    if any(token in value for token in ("architekt", "bauleiter", "ingenieur", "tga", "bim", "konstrukteur", "bauzeichner", "planung")):
+    if any(token in value for token in (
+        "architekt", "bauleiter", "projektleiter bau", "polier", "kalkulator", "ingenieur",
+        "tga", "bim", "konstrukteur", "bauzeichner", "planung"
+    )):
         return "Bau und Engineering"
-    if any(token in value for token in ("logistik", "lager", "spedition", "disponent", "fahrer")):
+    if any(token in value for token in (
+        "logistik", "lager", "spedition", "disponent", "fahrer", "stapler", "fuhrpark",
+        "supply chain", "einkaeufer", "fachlagerist"
+    )):
         return "Logistik und Einkauf"
-    if any(token in value for token in ("pharma", "labor", "biotech", "medizintechnik")):
+    if any(token in value for token in ("pharma", "pharmakant", "labor", "biotech", "medizintechnik", "apotheker", "pta", "regulatory", "clinical")):
         return "Pharma und Forschung"
-    if any(token in value for token in ("vertrieb", "sales", "marketing")):
+    if any(token in value for token in (
+        "vertrieb", "sales", "account manager", "business development", "customer success",
+        "marketing", "aussendienst"
+    )):
         return "Vertrieb und Marketing"
+    if any(token in value for token in (
+        "personalreferent", "recruit", "human resources", "hr business", "sachbearbeiter",
+        "assistenz", "bueromanagement", "industriekauf", "immobilienkauf", "immobilienverwalter", "lohn und gehalt"
+    )):
+        return "Personal und Verwaltung"
+    if any(token in value for token in ("koch", "kueche", "hotel", "restaurant", "gastronomie", "rezeption", "servicekraft")):
+        return "Gastronomie und Hotellerie"
     return ""
 
 
 def _radar_business_queries(term: str) -> list[str]:
     """Übersetzt Stellenbegriffe in lokale Unternehmenssuchen.
 
-    Standardkampagnen bleiben bewusst kompakt. Für die deutschlandweite
-    Logopädie Rohsammlung steht dagegen ein breiter Synonympool bereit.
-    Welche Varianten je Region tatsächlich abgefragt werden, entscheidet
-    _radar_queries_for_region.
+    Google Maps liefert bessere kleine Direktkunden, wenn nach Betriebstyp statt
+    nach einer Stellenbezeichnung gesucht wird. Für Therapie werden bewusst mehrere
+    unterschiedliche Betriebstypen verwendet, damit nicht nur die Google Top Treffer
+    eines einzelnen Suchmusters gefunden werden.
     """
     value = _norm(term)
     rules = [
-        (("physio", "physiotherapie"), ["Physiotherapie Praxis", "Physiotherapie Zentrum"]),
-        (("ergo", "ergotherapie"), ["Ergotherapie Praxis"]),
-        (("logo", "sprachtherap"), [
-            "Logopädie",
-            "Logopädie Praxis",
-            "Praxis für Logopädie",
-            "Logopädische Praxis",
-            "Sprachtherapie",
-            "Praxis für Sprachtherapie",
-            "Sprachtherapeutische Praxis",
-            "Stimmtherapie",
-            "Sprechtherapie",
-            "Schlucktherapie",
-            "Therapiezentrum Logopädie",
-            "Interdisziplinäres Therapiezentrum Logopädie",
+        (("physio", "physiotherapie"), [
+            "Physiotherapie", "Physiotherapie Praxis", "Krankengymnastik", "Therapiezentrum Physiotherapie"
+        ]),
+        (("ergo", "ergotherapie"), [
+            "Ergotherapie", "Ergotherapie Praxis", "Therapiezentrum Ergotherapie"
+        ]),
+        (("logo", "logop", "sprachtherap"), [
+            "Logopädie", "Praxis für Logopädie", "Sprachtherapie", "Stimmtherapie"
+        ]),
+        (("atem sprech stimm", "stimmlehrer"), [
+            "Atem Sprech Stimmtherapie", "Sprachtherapie", "Stimmtherapie"
+        ]),
+        (("praxisleitung therap", "therapeutische leitung"), [
+            "Therapiezentrum", "Heilmittelpraxis", "Praxisgemeinschaft Therapie"
         ]),
         (("pflege",), ["Ambulanter Pflegedienst", "Pflegedienst"]),
         (("mfa", "medizinische fachang", "arzt"), ["Arztpraxis", "Gemeinschaftspraxis"]),
         (("zahn",), ["Zahnarztpraxis"]),
+        (("tiermedizin",), ["Tierarztpraxis", "Tierklinik"]),
         (("steuer", "bilanzbuch", "lohnbuch", "finanzbuch"), ["Steuerberater", "Steuerkanzlei"]),
         (("rechtsanw", "legal", "jurist"), ["Rechtsanwaltskanzlei"]),
         (("notar",), ["Notariat"]),
@@ -1450,6 +1490,12 @@ def _radar_business_queries(term: str) -> list[str]:
         (("shk", "anlagenmechaniker", "sanitaer", "heizung"), ["Sanitär Heizung Klima", "SHK Betrieb"]),
         (("kaelte", "klima"), ["Kältetechnik", "Klimatechnik"]),
         (("dach",), ["Dachdecker"]),
+        (("gaertner", "landschaftsgaertner"), ["Garten und Landschaftsbau", "Gärtnerei"]),
+        (("gebaeudereiniger", "hausmeister", "facility"), ["Gebäudereinigung", "Facility Service"]),
+        (("baecker",), ["Bäckerei"]),
+        (("fleischer",), ["Metzgerei", "Fleischerei"]),
+        (("augenoptiker",), ["Augenoptiker"]),
+        (("hoerakustiker",), ["Hörakustiker"]),
         (("tischler", "schreiner"), ["Tischlerei", "Schreinerei"]),
         (("metallbau", "schweiss"), ["Metallbau"]),
         (("mechatron", "industriemechan", "zerspan", "cnc", "produktion"), ["Maschinenbau", "Metallverarbeitung"]),
@@ -1460,55 +1506,19 @@ def _radar_business_queries(term: str) -> list[str]:
         (("architekt", "bim", "bauzeichner"), ["Architekturbüro", "Planungsbüro"]),
         (("software", "devops", "systemadmin", "fachinformat", "it "), ["IT Dienstleister", "Softwareunternehmen"]),
         (("spedition", "logistik", "lager", "disponent", "fahrer"), ["Spedition", "Logistikunternehmen"]),
-        (("pharma", "labor", "biotech", "medizintechnik"), ["Medizintechnik", "Labor"]),
-        (("hotel", "koch", "restaurant", "gastronomie"), ["Hotel", "Restaurant"]),
+        (("pharma", "labor", "biotech", "medizintechnik", "apotheker", "pta"), ["Medizintechnik", "Labor", "Apotheke"]),
+        (("erzieher", "sozialpaedagog", "sozialarbeit", "heilerziehung"), ["Kindertagesstätte", "Jugendhilfe", "Soziale Einrichtung"]),
+        (("personalreferent", "recruit", "sachbearbeiter", "assistenz", "industriekauf"), ["Unternehmen", "Dienstleistungsunternehmen"]),
+        (("vertrieb", "sales", "account manager", "business development"), ["Unternehmen", "Handelsunternehmen", "Industrieunternehmen"]),
+        (("hotel", "koch", "restaurant", "gastronomie", "rezeption"), ["Hotel", "Restaurant"]),
+        (("verkaeufer", "filialleiter"), ["Einzelhandel", "Fachgeschäft"]),
     ]
     for tokens, queries in rules:
         if any(token in value for token in tokens):
-            return queries
+            return list(dict.fromkeys(queries))
     # Für unbekannte Begriffe bleibt die Suche bewusst eng am Original.
     cleaned = _clean(term)
     return [cleaned] if cleaned else []
-
-def _radar_queries_for_region(term: str, city: str, focus: str) -> list[str]:
-    """Begrenzt API Kosten und verteilt Synonyme über Deutschland.
-
-    Normale Kampagnen behalten maximal zwei Maps Suchbegriffe. Die spezielle
-    Logopädie Rohsammlung nutzt pro Ort vier Varianten. Zwei Kernbegriffe sind
-    immer dabei, zwei weitere rotieren deterministisch nach Ortsname. Dadurch
-    werden nicht in jeder Stadt zwölf fast identische Maps Requests erzeugt.
-    """
-    queries = list(dict.fromkeys(_radar_business_queries(term)))
-    if focus != LOGOPAEDIE_RADAR_CAMPAIGN:
-        return queries[:2]
-    if len(queries) <= 4:
-        return queries
-
-    chosen = queries[:2]
-    digest = hashlib.sha1(_norm(city).encode("utf-8")).hexdigest()
-    start = int(digest[:8], 16) % len(queries)
-    cursor = start
-    while len(chosen) < 4:
-        candidate = queries[cursor % len(queries)]
-        if candidate not in chosen:
-            chosen.append(candidate)
-        cursor += 1
-    return chosen
-
-
-def _radar_place_key(company: str, city: str, address: str, website: str, reference: str) -> str:
-    """Eindeutige Maps Identität ohne gleichnamige Praxen bundesweit zu verschlucken."""
-    if reference:
-        return "ref:" + _norm(reference)
-    if website:
-        try:
-            host = (urlparse(website).hostname or "").lower().removeprefix("www.")
-        except Exception:
-            host = ""
-        if host:
-            return "web:" + host
-    return "name:" + _company_key(company) + "|" + _norm(address or city)
-
 
 def _term_matches_job(term: str, title: str, company: str = "", description: str = "") -> bool:
     """Verhindert breite API Treffer wie Software Architect bei Architekt."""
@@ -1573,10 +1583,18 @@ def _small_business_profile(
     normal = _norm(combined)
     company_normal = _norm(company)
     segment, segment_hits = _segment_for_employer(company, description)
+    # Radar-Treffer haben häufig generische Namen wie "Praxis am Park".
+    # Dann darf die Kampagne nicht nur deshalb den Betrieb verlieren, weil im
+    # Firmennamen das Wort Logopädie/Physio/Ergo fehlt. Der Suchbegriff liefert
+    # in diesem Fall einen belastbaren Segment-Hinweis.
+    term_segment = _segment_for_term(term)
+    if segment == "Direktkunde" and term_segment:
+        segment = term_segment
+        segment_hits = [f"Suchkontext: {clean_text(term)}"]
     job_count = int(company_data.get("job_count", 1) or 1)
     distinct_titles = int(company_data.get("distinct_titles", 1) or 1)
     location_count = int(company_data.get("location_count", 1) or 1)
-    broad_mode = focus in {"Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden", "Diamanten Radar | kleine Direktkunden"}
+    broad_mode = focus in {"Bedarfsradar Deutschland | alle Berufsgruppen", "Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden", "Diamanten Radar | kleine Direktkunden"}
     strict_wave = focus == "Montagswelle 500 | Testpilot Fachkräfte"
     radar_mode = not _clean(title)
 
@@ -1751,7 +1769,7 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
             excluded["large_name"] += 1
             continue
 
-        company_data = stats.get(_company_stats_key(job), {})
+        company_data = stats.get(_company_key(company), {})
         profile = _small_business_profile(
             company=company,
             title=title,
@@ -1773,9 +1791,6 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
             excluded["oversize"] += 1
             continue
         if focus == "Testpilot Therapie 500" and profile["segment"] != "Therapiepraxis":
-            excluded["focus"] += 1
-            continue
-        if focus == LOGOPAEDIE_RADAR_CAMPAIGN and profile["segment"] != "Therapiepraxis":
             excluded["focus"] += 1
             continue
         if focus == "Montagswelle 500 | Testpilot Fachkräfte":
@@ -1878,7 +1893,7 @@ def score_and_filter(jobs: list[dict], diagnostics: list[str], focus: str = "All
         elif focus == "Diamanten Radar | kleine Direktkunden":
             minimum_score = 46
         else:
-            minimum_score = 22 if focus in {"Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden"} else max(MIN_LEAD_SCORE, 30)
+            minimum_score = 22 if focus in {"Bedarfsradar Deutschland | alle Berufsgruppen", "Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden"} else max(MIN_LEAD_SCORE, 30)
         if score < minimum_score:
             excluded["low_score"] += 1
             continue

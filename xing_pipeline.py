@@ -15,11 +15,11 @@ from research import root_domain
 from research import research_company
 from sales_ai import ASSET_KEYS, create_sales_assets
 
-PIPELINE_SCHEMA_VERSION = "11.3.0"
+PIPELINE_SCHEMA_VERSION = "11.4.0"
 MONDAY_WAVE_CAMPAIGN = "Montagswelle 500 | Testpilot Fachkräfte"
 TESTPILOT_THERAPY_CAMPAIGN = "Testpilot Therapie 500"
 DIAMOND_RADAR_CAMPAIGN = "Diamanten Radar | kleine Direktkunden"
-LOGOPAEDIE_RADAR_CAMPAIGN = "Logopädie Radar Deutschland"
+DEMAND_RADAR_CAMPAIGN = "Bedarfsradar Deutschland | alle Berufsgruppen"
 
 
 BENEFIT_PATTERNS = {
@@ -210,8 +210,18 @@ def normalize_company(name: str) -> str:
     return research_normalize_company(clean_text(name))
 
 
-def lead_id(company: str) -> str:
-    return hashlib.sha1(normalize_company(company).encode("utf-8")).hexdigest()[:14]
+def lead_id(company: str, discriminator: str = "") -> str:
+    """Stable lead id.
+
+    Legacy vacancy leads keep the historical company-only id.
+    Radar-only companies may add a domain/place discriminator so common names
+    such as "Praxis am Markt" in different cities are not collapsed.
+    """
+    identity = normalize_company(company)
+    extra = clean_text(discriminator).lower()
+    if extra:
+        identity = f"{identity}|{extra}"
+    return hashlib.sha1(identity.encode("utf-8")).hexdigest()[:14]
 
 
 def unique(values: list[Any]) -> list[str]:
@@ -676,16 +686,17 @@ def job_family(title: str) -> str:
         "Steuer und Finanzen": ["steuerfach", "bilanzbuch", "finanzbuch", "buchhalter", "controller", "lohn", "tax", "accounting"],
         "Recht": ["rechtsanw", "jurist", "legal", "notar", "paralegal", "wirtschaftsrecht"],
         "Therapie": ["physio", "ergotherapeut", "logop", "therapeut", "heilpaed"],
-        "Pflege und Medizin": ["pflege", "medizinische fachang", "arzt", "arztin", "mfa", "gesundheits", "kranken", "zahn"],
-        "Elektro und Technik": ["elektroniker", "elektriker", "mechatron", "servicetechn", "sps", "automation", "instandhalt"],
+        "Pflege und Medizin": ["pflege", "medizinische fachang", "tiermedizinische fachang", "arzt", "arztin", "mfa", "gesundheits", "kranken", "zahn"],
+        "Elektro und Technik": ["elektroniker", "elektriker", "mechatron", "servicetechn", "sps", "automation", "instandhalt", "gaertner", "gebaeudereiniger", "hausmeister", "facility", "baecker", "fleischer", "augenoptiker", "hoerakustiker"],
         "Metall und Produktion": ["schlosser", "schwei", "industriemechan", "zerspan", "cnc", "monteur", "metall", "produktion", "maschinenbedien"],
         "Bau und Engineering": ["bauleiter", "architekt", "ingenieur", "konstrukteur", "projektleiter", "tiefbau", "hochbau", "tga", "kalkulator", "polier", "bim", "bauzeichner", "stadtplan", "landschaftsarchitekt", "innenarchitekt"],
         "IT und Daten": ["software", "entwickler", "developer", "devops", "systemadministrator", "it support", "informatik", "data", "cloud", "security"],
         "Vertrieb und Marketing": ["vertrieb", "sales", "account manager", "business development", "marketing", "e commerce", "performance"],
         "Logistik und Einkauf": ["lager", "logistik", "stapler", "fahrer", "disponent", "verlader", "berufskraft", "spedition", "einkauf"],
         "Pharma und Forschung": ["pharma", "labor", "chemie", "regulatory", "clinical", "apotheker", "pta", "forschung"],
-        "Personal und Verwaltung": ["sachbearbeiter", "assistenz", "office", "personalreferent", "recruit", "human resources", "kaufmann", "kauffrau"],
+        "Personal und Verwaltung": ["sachbearbeiter", "assistenz", "office", "personalreferent", "recruit", "human resources", "kaufmann", "kauffrau", "immobilienkauf", "immobilienverwalter"],
         "Gastronomie und Hotellerie": ["koch", "kueche", "restaurant", "hotel", "servicekraft", "rezeption"],
+        "Soziales und Bildung": ["erzieher", "paedagogische fachkraft", "sozialpaedagog", "sozialarbeit", "heilerziehung", "heilpaedagog", "paedagog"],
     }
     for family, keywords in families.items():
         if any(keyword in value for keyword in keywords):
@@ -710,6 +721,7 @@ def infer_lead_segment(text: str) -> str:
         "Pharma und Forschung": ["pharma", "labor", "chemie", "regulatory", "clinical", "apotheke", "forschung"],
         "Personal und Verwaltung": ["personalreferent", "recruit", "human resources", "sachbearbeiter", "assistenz", "office", "kaufmann"],
         "Gastronomie und Hotellerie": ["gastronomie", "hotel", "restaurant", "koch", "kueche", "rezeption"],
+        "Soziales und Bildung": ["erzieher", "paedagogische fachkraft", "sozialpaedagog", "sozialarbeit", "heilerziehung", "heilpaedagog", "paedagog", "kita", "jugendhilfe"],
     }
     best = "Direktkunde"
     best_count = 0
@@ -862,23 +874,6 @@ CRM_GENERIC_DOMAINS = {
 }
 
 
-CRM_AMBIGUOUS_COMPANY_NAMES = {
-    "praxis fur logopadie",
-    "logopadie praxis",
-    "logopadische praxis",
-    "praxis fur sprachtherapie",
-    "sprachtherapie praxis",
-    "sprachtherapeutische praxis",
-    "therapiezentrum logopadie",
-    "praxisgemeinschaft logopadie",
-}
-
-
-def _crm_name_is_ambiguous(company: str) -> bool:
-    """Generische Praxisnamen dürfen nicht bundesweit per Name gesperrt werden."""
-    return normalize_company(company) in CRM_AMBIGUOUS_COMPANY_NAMES
-
-
 def company_match_keys(company: str) -> set[str]:
     """Erzeugt sichere Alias Keys für den Salesforce Abgleich."""
     normalized = normalize_company(company)
@@ -957,7 +952,7 @@ def crm_match(
 ) -> bool:
     """Salesforce Abgleich über Firmenalias plus, nach Recherche, Domain und Telefon."""
     candidate_keys = company_match_keys(company)
-    if not _crm_name_is_ambiguous(company) and candidate_keys & exclusions:
+    if candidate_keys & exclusions:
         return True
     domains = {_crm_domain(website), _crm_domain(email)} - {""}
     if any(f"@domain:{domain}" in exclusions for domain in domains):
@@ -1111,45 +1106,31 @@ def score_lead(
     return status, score, ", ".join(explanation)
 
 
-def _discovery_group_key(job: dict[str, Any]) -> str:
-    """Stabile Discovery Identität.
-
-    Normale Stellenfunde bleiben wie bisher firmenbasiert. Google Maps Radar
-    Funde nutzen zusätzlich die Place Referenz. Dadurch verschlucken sich
-    gleichnamige Praxen in verschiedenen Städten nicht gegenseitig.
-    """
-    company = clean_text(job.get("company", ""))
-    company_key = normalize_company(company)
-    if not company_key:
-        return ""
-    if clean_text(job.get("discovery_kind", "")) == "Firmenradar":
-        reference = clean_text(job.get("reference", ""))
-        if reference:
-            return f"radar|{company_key}|{reference.lower()}"
-        website = clean_text(job.get("website", ""))
-        domain = root_domain(website) if website else ""
+def _radar_identity_hint(job: dict[str, Any]) -> str:
+    website = clean_text(job.get("website", "") or job.get("external_url", ""))
+    if website:
+        domain = root_domain(website)
         if domain:
-            return f"radar|{company_key}|{domain.lower()}"
-        city = clean_text(job.get("city", "")).lower()
-        return f"radar|{company_key}|{city}"
-    return company_key
-
-
-def _discovery_lead_id(company: str, jobs: list[dict[str, Any]]) -> str:
-    if jobs and all(clean_text(job.get("discovery_kind", "")) == "Firmenradar" for job in jobs):
-        key = _discovery_group_key(jobs[0])
-        if key:
-            return hashlib.sha1(key.encode("utf-8")).hexdigest()[:14]
-    return lead_id(company)
+            return f"domain:{domain.lower()}"
+    reference = clean_text(job.get("reference", ""))
+    if reference:
+        return f"place:{reference.lower()}"
+    city = normalize_company(clean_text(job.get("city", "")))
+    return f"city:{city}" if city else ""
 
 
 def _group_jobs(parsed_jobs: list[dict], exclusions: set[str]) -> dict[str, list[dict]]:
     groups: dict[str, list[dict]] = defaultdict(list)
     for job in parsed_jobs:
         company = clean_text(job.get("company", ""))
-        key = _discovery_group_key(job)
+        key = normalize_company(company)
         if not key or crm_match(company, exclusions):
             continue
+        is_radar = clean_text(job.get("discovery_kind", "")) == "Firmenradar" and not clean_text(job.get("title", ""))
+        if is_radar:
+            hint = _radar_identity_hint(job)
+            if hint:
+                key = f"{key}|{hint}"
         groups[key].append(job)
     return groups
 
@@ -1193,10 +1174,7 @@ def build_discovery_leads(
         size_fit = clean_text(next((job.get("size_fit", "") for job in jobs if job.get("size_fit")), "")) or "Mittel"
         small_business_score = max([int(float(job.get("small_business_score", 0) or 0)) for job in jobs] or [50])
         size_reason = clean_text(next((job.get("size_reason", "") for job in jobs if job.get("size_reason")), ""))
-        broad_campaign = focus in {
-            "Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden",
-            DIAMOND_RADAR_CAMPAIGN, LOGOPAEDIE_RADAR_CAMPAIGN,
-        }
+        broad_campaign = focus in {DEMAND_RADAR_CAMPAIGN, "Breite Massenkampagne", "Alle Direktkunden", "Alle kleinen Direktkunden", DIAMOND_RADAR_CAMPAIGN}
         if focus == "Chancenmix Architektur Ingenieurwesen Steuer IT":
             max_jobs = 15
         elif focus == MONDAY_WAVE_CAMPAIGN:
@@ -1207,8 +1185,13 @@ def build_discovery_leads(
             skipped += 1
             continue
 
-        lid = _discovery_lead_id(company, jobs)
+        identity_hint = _radar_identity_hint(jobs[0]) if radar_only else ""
+        lid = lead_id(company, identity_hint)
         old = existing_map.get(lid, {})
+        # Backward compatibility: if an older radar lead was stored with the
+        # company-only id, reuse its researched/manual fields instead of losing them.
+        if radar_only and not old:
+            old = existing_map.get(lead_id(company), {})
         website = next((clean_text(job.get("website", "")) for job in jobs if job.get("website")), "")
         career_page = next((clean_text(job.get("career_url", "")) for job in jobs if job.get("career_url")), "")
         need_signal = next((clean_text(job.get("need_signal", "")) for job in jobs if job.get("need_signal")), "")

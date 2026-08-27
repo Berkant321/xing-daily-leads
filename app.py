@@ -57,14 +57,50 @@ st.set_page_config(
 )
 
 
-LOGOPAEDIE_RADAR_CAMPAIGN = "Logopädie Radar Deutschland"
-
-
 CAMPAIGN_PRESETS = {
-    LOGOPAEDIE_RADAR_CAMPAIGN: [
-        # Ein Discovery Begriff. scanner.py erzeugt daraus je Region rotierende
-        # Google Maps Synonyme. Dadurch entstehen keine 15 fast identischen Tasks.
-        "Logopädie",
+    "Bedarfsradar Deutschland | alle Berufsgruppen": [
+        # Breiter Bedarfsradar: Nicht auf eine Branche begrenzen, sondern dort suchen,
+        # wo Unternehmen aktuell Personal ausschreiben. Die Begriffe decken die
+        # wichtigsten XING relevanten Fachkräftefelder und typische KMU Rollen ab.
+        "Physiotherapeut", "Ergotherapeut", "Logopäde", "Sprachtherapeut",
+        "Pflegefachkraft", "Altenpfleger", "Gesundheits und Krankenpfleger",
+        "Medizinische Fachangestellte", "Zahnmedizinische Fachangestellte",
+        "Operationstechnischer Assistent", "Anästhesietechnischer Assistent",
+        "Heilerziehungspfleger", "Erzieher", "Pädagogische Fachkraft", "Sozialpädagoge", "Sozialarbeiter",
+        "Tiermedizinische Fachangestellte",
+        "Elektroniker", "Elektriker", "Anlagenmechaniker SHK", "Mechatroniker",
+        "Kfz Mechatroniker", "Servicetechniker", "Kältetechniker", "Dachdecker",
+        "Tischler", "Schreiner", "Metallbauer", "Schweißer", "Maler und Lackierer",
+        "Maurer", "Straßenbauer", "Tiefbaufacharbeiter", "Zimmerer", "Monteur",
+        "Gärtner", "Landschaftsgärtner", "Gebäudereiniger", "Hausmeister", "Facility Manager",
+        "Bäcker", "Fleischer", "Augenoptiker", "Hörakustiker",
+        "Industriemechaniker", "Zerspanungsmechaniker", "CNC Fräser", "CNC Dreher",
+        "Maschinen und Anlagenführer", "Maschinenbediener", "Produktionsmitarbeiter",
+        "Werkzeugmechaniker", "Instandhalter", "Qualitätsprüfer", "Qualitätsmanager",
+        "Schichtleiter Produktion", "Verfahrensmechaniker",
+        "Bauleiter", "Polier", "Kalkulator", "Projektleiter Bau", "Projektingenieur",
+        "TGA Planer", "BIM Manager", "Bauzeichner", "Architekt", "Konstrukteur",
+        "Elektroingenieur", "Maschinenbauingenieur", "Versorgungsingenieur",
+        "Steuerfachangestellte", "Steuerfachwirt", "Bilanzbuchhalter", "Lohnbuchhalter",
+        "Finanzbuchhalter", "Accountant", "Controller", "Steuerberater",
+        "Rechtsanwaltsfachangestellte", "Notarfachangestellte", "Rechtsanwalt", "Legal Counsel",
+        "Softwareentwickler", "Frontend Entwickler", "Backend Entwickler", "Full Stack Entwickler",
+        "Systemadministrator", "IT Administrator", "IT Support", "Fachinformatiker",
+        "DevOps Engineer", "Cloud Engineer", "Data Engineer", "Cyber Security Specialist",
+        "SAP Berater", "ERP Berater",
+        "Vertriebsmitarbeiter", "Vertriebsinnendienst", "Außendienstmitarbeiter", "Sales Manager",
+        "Account Manager", "Key Account Manager", "Business Development Manager",
+        "Customer Success Manager", "Technischer Vertrieb", "Einkäufer",
+        "Berufskraftfahrer", "LKW Fahrer", "Disponent", "Speditionskaufmann",
+        "Fachkraft für Lagerlogistik", "Fachlagerist", "Lagermitarbeiter", "Staplerfahrer", "Fuhrparkleiter",
+        "Supply Chain Manager",
+        "Laborant", "Chemielaborant", "Pharmakant", "Apotheker", "PTA",
+        "Regulatory Affairs Manager", "Clinical Research Associate", "Medizintechniker",
+        "Recruiter", "Personalreferent", "HR Business Partner", "Lohn und Gehaltsbuchhalter",
+        "Sachbearbeiter", "Assistenz der Geschäftsführung", "Kaufmann für Büromanagement",
+        "Industriekaufmann", "Immobilienkaufmann", "Immobilienverwalter",
+        "Koch", "Küchenchef", "Servicekraft", "Restaurantfachmann", "Hotelfachmann", "Rezeptionist",
+        "Verkäufer", "Filialleiter",
     ],
     "Diamanten Radar | kleine Direktkunden": [
         # Firmenradar: Nicht nur offene Stellen suchen, sondern lokale Betriebe direkt finden
@@ -90,13 +126,15 @@ CAMPAIGN_PRESETS = {
         "Industriemechaniker", "Zerspanungsmechaniker", "CNC Fräser",
     ],
     "Testpilot Therapie 500": [
-        "Physiotherapeut", "Physiotherapeutin", "Physiotherapie",
-        "Ergotherapeut", "Ergotherapeutin", "Ergotherapie",
-        "Logopäde", "Logopädin", "Logopädie",
-        "Sprachtherapeut", "Sprachtherapeutin",
+        # Weniger redundante Rollenbegriffe, dafür vollständige Abdeckung der
+        # relevanten Therapiesegmente. Der Firmenradar übersetzt diese Begriffe
+        # zusätzlich in mehrere Betriebstyp-Suchen.
+        "Physiotherapeut",
+        "Ergotherapeut",
+        "Logopäde",
+        "Sprachtherapeut",
         "Atem Sprech Stimmlehrer",
-        "Praxisleitung Physiotherapie", "Fachliche Leitung Physiotherapie",
-        "Therapeutische Leitung",
+        "Praxisleitung Therapie",
     ],
     "Chancenmix Architektur Ingenieurwesen Steuer IT": [
         # Absichtlich gemischt. Schon der erste Klick liefert vier unterschiedliche Zielmärkte.
@@ -212,245 +250,52 @@ MONDAY_WAVE_REGIONS = [
 ]
 
 TESTPILOT_THERAPY_REGIONS = [
-    ("Hamburg", 120), ("Bremen", 100), ("Hannover", 110), ("Kiel", 100),
-    ("Rostock", 120), ("Berlin", 130), ("Potsdam", 90), ("Magdeburg", 110),
-    ("Leipzig", 110), ("Dresden", 110), ("Erfurt", 110), ("Kassel", 110),
-    ("Nürnberg", 110), ("München", 130), ("Augsburg", 90), ("Stuttgart", 120),
-    ("Freiburg im Breisgau", 100), ("Frankfurt am Main", 120), ("Mannheim", 100),
-    ("Saarbrücken", 100), ("Köln", 110), ("Düsseldorf", 100), ("Dortmund", 100),
-    ("Münster", 100), ("Bielefeld", 100),
+    # Dichtes Deutschland-Raster statt weniger riesiger Umkreise.
+    # Google Maps liefert pro Suche nur eine begrenzte Zahl relevanter Treffer.
+    # Viele kleinere Anker reduzieren den "Top-20"-Bias und holen deutlich mehr
+    # kleine Praxen aus Mittelstädten und Randlagen.
+    ("Flensburg", 55), ("Kiel", 55), ("Lübeck", 55), ("Hamburg", 55),
+    ("Schwerin", 55), ("Rostock", 55), ("Neubrandenburg", 55),
+    ("Bremen", 55), ("Oldenburg", 55), ("Osnabrück", 55),
+    ("Hannover", 55), ("Braunschweig", 55), ("Göttingen", 55),
+    ("Magdeburg", 55), ("Potsdam", 55), ("Berlin", 55),
+    ("Cottbus", 55), ("Frankfurt Oder", 55),
+    ("Münster", 55), ("Bielefeld", 55), ("Paderborn", 55),
+    ("Dortmund", 50), ("Essen", 45), ("Duisburg", 45),
+    ("Düsseldorf", 45), ("Wuppertal", 45), ("Köln", 45),
+    ("Bonn", 45), ("Aachen", 50), ("Siegen", 55),
+    ("Kassel", 55), ("Erfurt", 55), ("Jena", 55), ("Gera", 55),
+    ("Leipzig", 55), ("Dresden", 55), ("Chemnitz", 55),
+    ("Koblenz", 55), ("Trier", 55), ("Mainz", 50),
+    ("Frankfurt am Main", 50), ("Darmstadt", 50), ("Fulda", 55),
+    ("Saarbrücken", 55), ("Kaiserslautern", 55),
+    ("Mannheim", 45), ("Heidelberg", 45), ("Karlsruhe", 50),
+    ("Heilbronn", 50), ("Stuttgart", 50), ("Ulm", 55),
+    ("Freiburg im Breisgau", 55), ("Villingen-Schwenningen", 55),
+    ("Würzburg", 55), ("Bamberg", 55), ("Bayreuth", 55),
+    ("Nürnberg", 55), ("Regensburg", 55), ("Passau", 55),
+    ("Ingolstadt", 55), ("Augsburg", 50), ("München", 50),
+    ("Landshut", 55), ("Rosenheim", 55), ("Kempten", 55),
 ]
 
-# Deutschlandweit deutlich dichter als die bisherigen 25 Großradien.
-# 30 km halten die Google Maps Ergebnislisten lokal und reduzieren das Problem,
-# dass bei 100 bis 150 km nur die prominentesten Treffer sichtbar werden.
-LOGOPAEDIE_RADAR_CITIES = [
-    'Kiel',
-    'Lübeck',
-    'Flensburg',
-    'Neumünster',
-    'Norderstedt',
-    'Elmshorn',
-    'Pinneberg',
-    'Itzehoe',
-    'Rendsburg',
-    'Schleswig',
-    'Husum',
-    'Heide',
-    'Eutin',
-    'Bad Segeberg',
-    'Ahrensburg',
-    'Hamburg',
-    'Bremen',
-    'Bremerhaven',
-    'Hannover',
-    'Braunschweig',
-    'Oldenburg',
-    'Osnabrück',
-    'Wolfsburg',
-    'Göttingen',
-    'Hildesheim',
-    'Salzgitter',
-    'Wilhelmshaven',
-    'Delmenhorst',
-    'Lüneburg',
-    'Celle',
-    'Hameln',
-    'Cuxhaven',
-    'Stade',
-    'Buxtehude',
-    'Verden',
-    'Nienburg',
-    'Cloppenburg',
-    'Vechta',
-    'Meppen',
-    'Nordhorn',
-    'Emden',
-    'Aurich',
-    'Leer',
-    'Goslar',
-    'Köln',
-    'Düsseldorf',
-    'Dortmund',
-    'Essen',
-    'Duisburg',
-    'Bochum',
-    'Wuppertal',
-    'Bielefeld',
-    'Bonn',
-    'Münster',
-    'Gelsenkirchen',
-    'Mönchengladbach',
-    'Aachen',
-    'Krefeld',
-    'Oberhausen',
-    'Hagen',
-    'Hamm',
-    'Mülheim an der Ruhr',
-    'Leverkusen',
-    'Solingen',
-    'Herne',
-    'Neuss',
-    'Paderborn',
-    'Recklinghausen',
-    'Bottrop',
-    'Remscheid',
-    'Moers',
-    'Siegen',
-    'Gütersloh',
-    'Iserlohn',
-    'Düren',
-    'Ratingen',
-    'Marl',
-    'Lüdenscheid',
-    'Bergisch Gladbach',
-    'Troisdorf',
-    'Detmold',
-    'Minden',
-    'Wesel',
-    'Kleve',
-    'Bocholt',
-    'Rheine',
-    'Ahlen',
-    'Arnsberg',
-    'Soest',
-    'Frankfurt am Main',
-    'Wiesbaden',
-    'Kassel',
-    'Darmstadt',
-    'Offenbach am Main',
-    'Hanau',
-    'Gießen',
-    'Marburg',
-    'Fulda',
-    'Rüsselsheim am Main',
-    'Bad Homburg',
-    'Wetzlar',
-    'Limburg an der Lahn',
-    'Bensheim',
-    'Mainz',
-    'Ludwigshafen am Rhein',
-    'Koblenz',
-    'Trier',
-    'Kaiserslautern',
-    'Worms',
-    'Neuwied',
-    'Speyer',
-    'Landau in der Pfalz',
-    'Bad Kreuznach',
-    'Pirmasens',
-    'Zweibrücken',
-    'Andernach',
-    'Saarbrücken',
-    'Neunkirchen Saar',
-    'Homburg Saar',
-    'Saarlouis',
-    'Stuttgart',
-    'Mannheim',
-    'Karlsruhe',
-    'Freiburg im Breisgau',
-    'Heidelberg',
-    'Heilbronn',
-    'Ulm',
-    'Pforzheim',
-    'Reutlingen',
-    'Esslingen am Neckar',
-    'Ludwigsburg',
-    'Tübingen',
-    'Villingen Schwenningen',
-    'Konstanz',
-    'Aalen',
-    'Offenburg',
-    'Friedrichshafen',
-    'Baden Baden',
-    'Lörrach',
-    'Schwäbisch Gmünd',
-    'Göppingen',
-    'Sindelfingen',
-    'München',
-    'Nürnberg',
-    'Augsburg',
-    'Regensburg',
-    'Ingolstadt',
-    'Würzburg',
-    'Fürth',
-    'Erlangen',
-    'Bamberg',
-    'Bayreuth',
-    'Landshut',
-    'Aschaffenburg',
-    'Kempten Allgäu',
-    'Rosenheim',
-    'Passau',
-    'Schweinfurt',
-    'Hof',
-    'Freising',
-    'Dachau',
-    'Memmingen',
-    'Straubing',
-    'Deggendorf',
-    'Amberg',
-    'Coburg',
-    'Ansbach',
-    'Weiden in der Oberpfalz',
-    'Garmisch Partenkirchen',
-    'Berlin',
-    'Potsdam',
-    'Cottbus',
-    'Brandenburg an der Havel',
-    'Frankfurt Oder',
-    'Oranienburg',
-    'Eberswalde',
-    'Bernau bei Berlin',
-    'Königs Wusterhausen',
-    'Neuruppin',
-    'Rostock',
-    'Schwerin',
-    'Neubrandenburg',
-    'Stralsund',
-    'Greifswald',
-    'Wismar',
-    'Güstrow',
-    'Leipzig',
-    'Dresden',
-    'Chemnitz',
-    'Zwickau',
-    'Plauen',
-    'Görlitz',
-    'Freiberg Sachsen',
-    'Bautzen',
-    'Pirna',
-    'Riesa',
-    'Magdeburg',
-    'Halle Saale',
-    'Dessau Roßlau',
-    'Lutherstadt Wittenberg',
-    'Halberstadt',
-    'Stendal',
-    'Merseburg',
-    'Quedlinburg',
-    'Erfurt',
-    'Jena',
-    'Gera',
-    'Weimar',
-    'Gotha',
-    'Eisenach',
-    'Nordhausen',
-    'Suhl',
-    'Mühlhausen Thüringen',
+DEMAND_RADAR_REGIONS = [
+    # Für Stellenquellen sind größere Radien sinnvoll. Anders als Google Maps
+    # liefern Bundesagentur, Google Jobs und Adzuna echte Vakanzen statt nur
+    # die sichtbarsten Firmen eines Kartenausschnitts.
+    ("Hamburg", 160), ("Bremen", 150), ("Hannover", 150), ("Münster", 150),
+    ("Dortmund", 130), ("Düsseldorf", 130), ("Köln", 130), ("Frankfurt am Main", 150),
+    ("Mannheim", 130), ("Stuttgart", 150), ("Nürnberg", 150), ("München", 170),
+    ("Leipzig", 150), ("Dresden", 140), ("Berlin", 170), ("Rostock", 160),
 ]
-LOGOPAEDIE_RADAR_REGIONS = [(city, 30) for city in LOGOPAEDIE_RADAR_CITIES]
-
 
 CAMPAIGN_REGIONS = {
-    LOGOPAEDIE_RADAR_CAMPAIGN: LOGOPAEDIE_RADAR_REGIONS,
+    "Bedarfsradar Deutschland | alle Berufsgruppen": DEMAND_RADAR_REGIONS,
     "Diamanten Radar | kleine Direktkunden": MONDAY_WAVE_REGIONS,
     "Montagswelle 500 | Testpilot Fachkräfte": MONDAY_WAVE_REGIONS,
     "Testpilot Therapie 500": TESTPILOT_THERAPY_REGIONS,
 }
 
 CAMPAIGN_TARGETS = {
-    LOGOPAEDIE_RADAR_CAMPAIGN: 3000,
     "Diamanten Radar | kleine Direktkunden": 500,
     "Montagswelle 500 | Testpilot Fachkräfte": 500,
     "Testpilot Therapie 500": 500,
@@ -511,7 +356,7 @@ def _google_config_signature() -> str:
         client_email,
     ])
 
-KMU_SCHEMA_VERSION = "11.3.0"
+KMU_SCHEMA_VERSION = "11.4.0"
 
 
 def exclusive_invitation_subject(company: Any) -> str:
@@ -1675,8 +1520,6 @@ if page == "Daily Leads":
                 label = "versandbereiten, Salesforce sauberen Accounts"
             elif campaign == "Diamanten Radar | kleine Direktkunden":
                 label = "qualifizierten Radar Kandidaten"
-            elif campaign == LOGOPAEDIE_RADAR_CAMPAIGN:
-                label = "eindeutigen Logopädie Rohfunden"
             else:
                 label = "neuen Firmen vorbereitet"
             st.progress(target_ratio, text=f"Wellenziel: {campaign_ready_count} von {campaign_target} {label}")
@@ -1696,15 +1539,14 @@ if page == "Daily Leads":
                     "Das Firmenradar zählt kleine neue Direktkunden mit belastbaren Firmensignalen. "
                     "Eine offene Stelle wird nur behauptet, wenn sie auf einer echten Quelle gefunden wurde."
                 )
-            elif campaign == LOGOPAEDIE_RADAR_CAMPAIGN:
+            elif campaign == "Testpilot Therapie 500":
                 st.caption(
-                    "Diese Kampagne sammelt zuerst deutschlandweit Logopädie und Sprachtherapie Praxen als Rohfunde. "
-                    "Eine offene Stelle, E Mail oder ein Ansprechpartner ist in Schritt 1 ausdrücklich keine Voraussetzung."
+                    "500 ist das Auswahlziel, nicht das Discovery Limit. Die Suche läuft über alle offenen "
+                    "Therapie Begriffe und Regionen weiter, damit Physio, Ergo, Logopädie und Sprachtherapie vollständig gemischt werden."
                 )
             else:
                 st.caption(
-                    "Diese Welle priorisiert kleine Physio, Ergo und Logopädie Praxen mit aktuellem Personalbedarf. "
-                    "Die Suche pausiert automatisch, sobald das Ziel erreicht ist."
+                    "Diese Welle priorisiert kleine Direktkunden mit aktuellem Personalbedarf."
                 )
         terms_text = st.text_area(
             "Suchbegriffe, eine Zeile je Begriff",
@@ -1718,37 +1560,45 @@ if page == "Daily Leads":
             key=f"regions_v60_{campaign}",
         )
 
+        is_demand_radar = campaign == "Bedarfsradar Deutschland | alle Berufsgruppen"
         is_diamond_wave = campaign == "Diamanten Radar | kleine Direktkunden"
-        is_logopaedie_radar = campaign == LOGOPAEDIE_RADAR_CAMPAIGN
-        is_radar_only_wave = is_diamond_wave or is_logopaedie_radar
+        is_therapy_wave = campaign == "Testpilot Therapie 500"
         source_columns = st.columns(5)
         use_radar = source_columns[0].checkbox(
             "Google Firmenradar",
-            value=bool(serpapi_key) and is_radar_only_wave,
-            key=f"source_radar_v11_{campaign}",
-            help="Findet lokale Unternehmen über Google Maps und prüft vorhandene Websites auf Karriere und Recruiting Signale.",
+            value=bool(serpapi_key) and (is_diamond_wave or is_therapy_wave) and not is_demand_radar,
+            key=f"source_radar_v114_{campaign}",
+            help="Findet lokale Unternehmen unabhängig davon, ob gerade eine Stelle veröffentlicht ist. Tiefenrecherche folgt erst in Schritt 2.",
+            disabled=is_demand_radar,
         )
         use_ba = source_columns[1].checkbox(
-            "Bundesagentur", value=not is_radar_only_wave, key=f"source_ba_v11_{campaign}"
+            "Bundesagentur", value=not is_diamond_wave, key=f"source_ba_v114_{campaign}"
         )
         use_google = source_columns[2].checkbox(
-            "Google Jobs", value=bool(serpapi_key) and not is_radar_only_wave, key=f"source_google_v11_{campaign}"
+            "Google Jobs", value=bool(serpapi_key) and not is_diamond_wave, key=f"source_google_v114_{campaign}"
         )
         use_adzuna = source_columns[3].checkbox(
-            "Adzuna", value=bool(adzuna_app_id and adzuna_api_key) and not is_radar_only_wave, key=f"source_adzuna_v11_{campaign}"
+            "Adzuna", value=bool(adzuna_app_id and adzuna_api_key) and not is_diamond_wave, key=f"source_adzuna_v114_{campaign}"
         )
         use_careers = source_columns[4].checkbox(
-            "Manuelle Karriereseiten", value=False, key=f"source_careers_v11_{campaign}"
+            "Manuelle Karriereseiten", value=False, key=f"source_careers_v114_{campaign}"
         )
-        if is_diamond_wave:
+        if is_demand_radar:
+            st.caption(
+                "Bedarfsradar: Bundesagentur, Google Jobs und Adzuna suchen parallel nach tatsächlich veröffentlichten Vakanzen. "
+                "Der Firmenradar bleibt bewusst optional, damit der Hauptlauf echte Recruiting Signale priorisiert. "
+                "Es gibt kein 500er Limit: Die Kampagne läuft über alle Berufsgruppen und Regionen weiter."
+            )
+        elif is_diamond_wave:
             st.caption(
                 "Empfohlen: zuerst nur Google Firmenradar. Dadurch suchst du bewusst außerhalb der üblichen Stellenbörsen. "
-                "Jede gefundene Firmenwebsite wird auf Karriere und Recruiting Signale geprüft und anschließend in Schritt 2 vertieft."
+                "Jede gefundene Firmenwebsite wird anschließend in Schritt 2 vertieft."
             )
-        elif is_logopaedie_radar:
+        elif is_therapy_wave:
             st.caption(
-                "Empfohlen: nur Google Firmenradar aktiv lassen. Die Rohsammlung nutzt einen dichten Deutschland Raster "
-                "und verteilt mehrere Logopädie und Sprachtherapie Suchvarianten über die Regionen. Tiefenrecherche folgt in Schritt 2."
+                "Vollabdeckung Therapie: Firmenradar + Bundesagentur + Google Jobs + Adzuna dürfen parallel laufen. "
+                "Der Firmenradar findet Praxen auch ohne veröffentlichte Stelle. Das Ziel 500 ist nur ein Auswahlziel; "
+                "die Discovery stoppt nicht mehr automatisch bei 500 Rohfirmen."
             )
 
         career_urls_text = st.text_area(
@@ -1765,16 +1615,16 @@ if page == "Daily Leads":
         is_testpilot_wave = campaign in {"Testpilot Therapie 500", "Montagswelle 500 | Testpilot Fachkräfte"}
         settings_columns = st.columns(4)
         days = settings_columns[0].number_input(
-            "Veröffentlicht seit Tagen", 1, 30, 14, key=f"days_v10_{campaign}"
+            "Veröffentlicht seit Tagen", 1, 30, 30 if is_demand_radar else 14, key=f"days_v114_{campaign}"
         )
         max_pages = settings_columns[1].number_input(
-            "Seiten je Suche", 1, 5, 1 if (is_diamond_wave or is_logopaedie_radar) else (2 if is_testpilot_wave else 1), key=f"pages_v11_{campaign}"
+            "Seiten je Suche", 1, 5, 2 if is_demand_radar else (1 if (is_diamond_wave or is_therapy_wave) else (2 if is_testpilot_wave else 1)), key=f"pages_v114_{campaign}"
         )
         task_batch_size = settings_columns[2].number_input(
-            "Suchaufgaben pro Klick", 1, 30, 10 if is_logopaedie_radar else (6 if is_diamond_wave else (12 if is_testpilot_wave else 4)), key=f"task_batch_v11_{campaign}"
+            "Suchaufgaben pro Klick", 1, 30, 18 if is_demand_radar else (18 if is_therapy_wave else (6 if is_diamond_wave else (12 if is_testpilot_wave else 4))), key=f"task_batch_v114_{campaign}"
         )
         region_batch_size = settings_columns[3].number_input(
-            "Regionen je Suchaufgabe", 1, 8, 3 if (is_diamond_wave or is_logopaedie_radar) else (4 if is_testpilot_wave else 3), key=f"region_batch_v11_{campaign}"
+            "Regionen je Suchaufgabe", 1, 8, 4 if is_demand_radar else (4 if is_therapy_wave else (3 if is_diamond_wave else (4 if is_testpilot_wave else 3))), key=f"region_batch_v114_{campaign}"
         )
 
         all_terms = [line.strip() for line in terms_text.splitlines() if line.strip()]
@@ -1808,12 +1658,6 @@ if page == "Daily Leads":
             "Jeder Klick verteilt die Suche auf unterschiedliche Berufsgruppen und kleine Regionspakete. "
             "Nach einem Neustart wird bei der nächsten offenen Kombination fortgesetzt. Kontakte folgen in Schritt 2."
         )
-        if is_logopaedie_radar:
-            total_region_groups = (len(preview_regions) + int(region_batch_size) - 1) // int(region_batch_size) if preview_regions else 0
-            st.caption(
-                f"Logopädie Raster: {len(preview_regions)} lokale Startpunkte, ungefähr {total_region_groups} Suchaufgaben. "
-                "Pro Ort werden vier rotierende Maps Suchvarianten genutzt. Eine Seite je Suche ist für die Rohsammlung der Standard."
-            )
 
         uploaded = st.file_uploader(
             "Optionaler Salesforce Export, vorhandene Firmen werden ausgeschlossen",
@@ -1927,7 +1771,7 @@ if page == "Daily Leads":
             completed_terms: list[str] = []
 
             for position, (term, task_regions) in enumerate(tasks_to_run, start=1):
-                if campaign_target:
+                if campaign_target and campaign != "Testpilot Therapie 500":
                     if campaign == "Diamanten Radar | kleine Direktkunden" and not frame.empty:
                         current_campaign_count = int(
                             diamond_candidate_mask(frame[frame["kampagne"] == campaign].copy()).sum()
@@ -1965,13 +1809,7 @@ if page == "Daily Leads":
                     )
                     eligible_jobs = [
                         job for job in parsed_jobs
-                        if not crm_match(
-                            clean_text(job.get("company", "")),
-                            exclusions,
-                            website=clean_text(job.get("website", "")),
-                            email=clean_text(job.get("email", "")),
-                            phone=clean_text(job.get("phone", "")),
-                        )
+                        if not crm_match(clean_text(job.get("company", "")), exclusions)
                     ]
                     fresh_job_rows = build_job_rows(
                         eligible_jobs,

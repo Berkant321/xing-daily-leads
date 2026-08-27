@@ -1,83 +1,39 @@
-# XING Daily Leads V11.3
+# XING Daily Leads V11.4.0 – Bedarfsradar Deutschland
 
-## Ziel
+Diese Version erweitert die Suche von einzelnen Therapiegruppen auf einen breiten Recruiting Bedarfsradar.
 
-Diese Version ergänzt eine eigene Kampagne namens `Logopädie Radar Deutschland`.
+## Neue Hauptkampagne
 
-Der Modus ist für maximale Firmendiscovery gebaut. Er verlangt in Schritt 1 keine offene Stelle, keine E Mail, keinen Ansprechpartner und keinen fertigen Verkaufstext.
+`Bedarfsradar Deutschland | alle Berufsgruppen`
 
-## Was geändert wurde
+Die Kampagne ist bewusst auf Unternehmen mit aktuell veröffentlichtem Recruiting Bedarf ausgelegt. Sie durchsucht parallel Bundesagentur, Google Jobs und optional Adzuna. Google Firmenradar bleibt als Ergänzung verfügbar, ist für diese Kampagne aber standardmäßig aus.
 
-1. Eigener Logopädie Radar
+## Was sich geändert hat
 
-Die Kampagne verwendet standardmäßig ausschließlich Google Firmenradar.
-Bundesagentur, Google Jobs und Adzuna sind in diesem Modus standardmäßig deaktiviert.
+1. Mehr als 120 Suchbegriffe aus Therapie, Pflege, Medizin, Soziales, Handwerk, Technik, Industrie, Bau, Engineering, Steuer, Recht, IT, Vertrieb, Logistik, Pharma, Verwaltung, Gastronomie und Handel.
+2. Deutschland Raster mit größeren Radien für echte Stellenquellen.
+3. Kein 500er Stopp. Alle offenen Berufsgruppen und Regionskombinationen werden sukzessive abgearbeitet.
+4. Bundesagentur und Google Jobs sind im Bedarfsradar standardmäßig aktiv. Adzuna ist aktiv, wenn Zugangsdaten vorhanden sind.
+5. Google Firmenradar ist im Bedarfsradar standardmäßig aus, weil der Hauptlauf tatsächliche Vakanzen priorisieren soll.
+6. Scoring und Segmentierung wurden um Soziales und Bildung sowie weitere Fachkräfterollen erweitert.
+7. Große bekannte Konzerne, Staffing Anbieter, öffentliche Arbeitgeber und Salesforce Treffer bleiben ausgeschlossen, damit die Liste auf neue Direktkunden fokussiert bleibt.
 
-2. Deutschland Raster
+## Empfohlene Nutzung
 
-Statt 25 sehr großer Regionen enthält der neue Modus 213 lokale Startpunkte mit jeweils 30 km Radius.
+Kampagne: `Bedarfsradar Deutschland | alle Berufsgruppen`
 
-3. Breitere Suchlogik
+Quellen: Bundesagentur + Google Jobs + Adzuna, sofern Zugangsdaten vorhanden sind
 
-Der Scanner kennt zwölf Suchvarianten rund um Logopädie und Sprachtherapie.
-Je Ort werden vier Varianten genutzt.
-Zwei Kernbegriffe sind immer aktiv.
-Zwei weitere Varianten rotieren abhängig vom Ort.
-Dadurch wird die Abdeckung breiter, ohne in jedem Ort zwölf nahezu identische SerpApi Requests auszuführen.
+Veröffentlichungsfenster: 30 Tage
 
-4. Rohsammlung vor Recherche
+Seiten je Suche: 2
 
-Schritt 1 speichert Firmenfunde sofort.
-Website, Karrierebereich, Ansprechpartner, E Mail und tiefere Prüfung bleiben Aufgabe von Schritt 2.
+Suchaufgaben pro Klick: 18
 
-5. Bessere Dublettenlogik
+Regionen je Suchaufgabe: 4
 
-Google Maps Place Referenzen werden als Discovery Identität genutzt.
-Gleichnamige Praxen in unterschiedlichen Städten werden dadurch nicht mehr automatisch als dieselbe Firma behandelt.
+Mehrere Läufe durchführen, bis die App meldet, dass alle Kombinationen durchsucht wurden. Danach Schritt 2 für Website, Karrierebereich, Ansprechpartner, E Mail und Telefon ausführen.
 
-6. Generische Praxisnamen
+## Zielbild
 
-Namen wie `Praxis für Logopädie` werden beim Salesforce Abgleich nicht mehr deutschlandweit nur aufgrund des Namens ausgeschlossen.
-Wenn Website Domain oder Telefonnummer vorhanden sind, werden diese weiterhin für den Abgleich genutzt.
-
-7. Zielgröße
-
-Die neue Rohsammlung hat ein technisches Kampagnenziel von 3000 eindeutigen Firmenfunden.
-Das ist ein Stop Ziel und keine Garantie für 3000 tatsächlich verfügbare Praxen.
-Die reale Zahl hängt unter anderem von Google Maps, SerpApi Kontingent, Dubletten und Salesforce Ausschlüssen ab.
-
-## Empfohlene Einstellungen
-
-Kampagne: `Logopädie Radar Deutschland`
-
-Quelle: nur `Google Firmenradar`
-
-Seiten je Suche: `1`
-
-Suchaufgaben pro Klick: `10`
-
-Regionen je Suchaufgabe: `3`
-
-Damit werden pro Klick ungefähr 30 lokale Startpunkte verarbeitet.
-Bei vier Maps Suchvarianten je Ort entstehen ungefähr 120 Maps Requests pro vollständigem Klick, sofern jede Suche ausgeführt werden kann.
-
-## Dateien
-
-`app.py`
-
-`scanner.py`
-
-`xing_pipeline.py`
-
-`research.py`
-
-`sales_ai.py`
-
-`requirements.txt`
-
-Die letzten drei Dateien entsprechen der hochgeladenen Version und wurden für ein vollständiges Paket mit aufgenommen.
-
-## Technischer Check
-
-Alle Python Dateien wurden mit `py_compile` auf Syntaxfehler geprüft.
-Zusätzlich wurden die neue Suchvariantenlogik, die Maps Identität und die getrennten Lead IDs für gleichnamige Praxen geprüft.
+Nicht eine einzelne Berufsgruppe möglichst tief durchsuchen, sondern möglichst viele neue Direktkunden dort finden, wo aktuell realer Recruiting Bedarf sichtbar ist.

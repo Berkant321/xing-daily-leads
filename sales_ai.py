@@ -152,6 +152,8 @@ def _job_family(titles: list[str]) -> str:
         ("Logistik", ("logistik", "lager", "fahrer", "disponent", "spedition")),
         ("Pharma und Forschung", ("pharma", "labor", "chemie", "regulatory", "clinical", "apothe")),
         ("Verwaltung und Personal", ("sachbear", "assistenz", "personal", "recruit", "office", "kaufm")),
+        ("Soziales und Bildung", ("erzieher", "sozialpädagog", "sozialpaedagog", "sozialarbeit", "heilerziehung", "pädagog", "paedagog")),
+        ("Gastronomie und Hotellerie", ("koch", "küche", "kueche", "hotel", "restaurant", "rezeption", "servicekraft")),
     ]
     for family, keywords in families:
         if any(keyword in text for keyword in keywords):
