@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 import time
 import unicodedata
@@ -16,27 +17,13 @@ from urllib3.util.retry import Retry
 
 
 _EXTRACT = tldextract.TLDExtract(suffix_list_urls=None)
-
-# Prozessweiter Schutz vor verbrannten SerpApi Requests. Sobald 429 kommt,
-# wird SerpApi in der laufenden Streamlit Instanz kurz pausiert. Die kostenlose
-# Recherche und direkte Website Prüfung laufen weiter.
 _SERPAPI_PAUSED_UNTIL = 0.0
 _SERPAPI_PAUSE_SECONDS = 15 * 60
-
-
-def _serpapi_is_paused() -> bool:
-    return time.monotonic() < _SERPAPI_PAUSED_UNTIL
-
-
-def _pause_serpapi() -> None:
-    global _SERPAPI_PAUSED_UNTIL
-    _SERPAPI_PAUSED_UNTIL = max(_SERPAPI_PAUSED_UNTIL, time.monotonic() + _SERPAPI_PAUSE_SECONDS)
 
 BROWSER_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
     "Accept-Language": "de-DE,de;q=0.9,en;q=0.7",
@@ -54,72 +41,32 @@ BLOCKED_DOMAINS = {
     "golocal.de", "branchenbuch.meinestadt.de", "companyhouse.de",
 }
 
+ATS_HOSTS = {
+    "jobs.personio.de", "jobs.personio.com", "greenhouse.io", "lever.co",
+    "smartrecruiters.com", "workable.com", "teamtailor.com", "softgarden.io",
+    "onlyfy.io", "join.com",
+}
+
 PAGE_KEYWORDS = {
-    "kontakt": 100,
-    "contact": 100,
-    "impressum": 95,
-    "imprint": 95,
-    "karriere": 90,
-    "career": 90,
-    "jobs": 88,
-    "stellenangebote": 88,
-    "team": 82,
-    "ansprechpartner": 82,
-    "mitarbeiter": 78,
-    "people": 76,
-    "ueber-uns": 65,
-    "uber-uns": 65,
-    "über-uns": 65,
-    "unternehmen": 60,
+    "karriere": 120, "career": 120, "jobs": 115, "stellenangebote": 115,
+    "stellen": 110, "bewerbung": 105, "bewerben": 105,
+    "team": 90, "mitarbeiter": 90, "people": 90, "ansprechpartner": 90,
+    "kontakt": 85, "contact": 85, "impressum": 80, "imprint": 80,
+    "ueber-uns": 65, "uber-uns": 65, "über-uns": 65, "unternehmen": 60,
     "about": 60,
 }
 
-EMAIL_PREFIX_SCORES = {
-    "recruiting": 75,
-    "personal": 72,
-    "karriere": 70,
-    "bewerbung": 70,
-    "bewerbungen": 70,
-    "jobs": 65,
-    "hr": 65,
-    "talent": 62,
-    "people": 58,
-    "office": 30,
-    "kontakt": 28,
-    "contact": 28,
-    "info": 24,
-}
-
-BAD_EMAIL_PREFIXES = {
-    "noreply", "no-reply", "donotreply", "datenschutz", "privacy",
-    "abuse", "postmaster", "webmaster", "newsletter", "marketing",
-}
-
 ROLE_SCORES = {
-    "talent acquisition": 100,
-    "recruiting": 98,
-    "recruiter": 96,
-    "people and culture": 95,
-    "people & culture": 95,
-    "head of people": 95,
-    "head of hr": 94,
-    "hr business partner": 93,
-    "hr manager": 92,
-    "personalleitung": 92,
-    "personalleiter": 92,
-    "leiter personal": 91,
-    "personalreferent": 88,
-    "human resources": 86,
-    "ansprechpartner bewerbung": 84,
-    "ansprechpartner karriere": 84,
-    "praxisinhaber": 80,
-    "kanzleiinhaber": 80,
-    "geschäftsführer": 78,
-    "geschäftsführung": 76,
-    "geschäftsleitung": 75,
-    "inhaber": 74,
-    "partner": 72,
-    "vertreten durch": 68,
+    "talent acquisition": 100, "recruiting": 98, "recruiter": 96,
+    "people and culture": 95, "people & culture": 95, "head of people": 95,
+    "head of hr": 94, "hr business partner": 93, "hr manager": 92,
+    "personalleitung": 92, "personalleiter": 92, "leiter personal": 91,
+    "personalreferent": 88, "human resources": 86,
+    "ansprechpartner bewerbung": 84, "ansprechpartner karriere": 84,
+    "praxisinhaber": 82, "kanzleiinhaber": 82,
+    "geschäftsführer": 80, "geschäftsführerin": 80, "geschäftsführung": 78,
+    "geschäftsleitung": 76, "inhaber": 76, "inhaberin": 76,
+    "partner": 72, "vertreten durch": 68,
 }
 
 ROLE_PATTERN = (
@@ -127,76 +74,56 @@ ROLE_PATTERN = (
     r"People\s*(?:&|and)\s*Culture|Head\s+of\s+People|HR\s+Business\s+Partner|"
     r"Head\s+of\s+HR|HR\s+Manager(?:in)?|Human\s+Resources|"
     r"Personalleiter(?:in)?|Personalleitung|Leiter(?:in)?\s+(?:des\s+)?Personal(?:wesens)?|"
-    r"Personalreferent(?:in)?|Ansprechpartner(?:in)?\s+(?:für\s+)?(?:Bewerbung(?:en)?|Karriere|Personal)|"
-    r"Praxisinhaber(?:in)?|Kanzleiinhaber(?:in)?|Geschäftsführer(?:in)?|Geschäftsführung|Geschäftsleitung|"
+    r"Personalreferent(?:in)?|Ansprechpartner(?:in)?(?:\s+(?:für|fuer)\s+(?:Bewerbung(?:en)?|Karriere|Personal))?|"
+    r"Kontaktperson|Praxisinhaber(?:in)?|Kanzleiinhaber(?:in)?|"
+    r"Geschäftsführer(?:in)?|Geschaeftsfuehrer(?:in)?|Geschäftsführung|Geschäftsleitung|"
     r"Inhaber(?:in)?|Partner(?:in)?|Vertreten\s+durch"
 )
 
-NAME_PATTERN = (
-    r"(?:(?:Frau|Herr)\s+)?"
-    r"(?:Dr\.?\s+|Prof\.?\s+|Dipl\.?[-\s]?[A-Za-zÄÖÜäöüß]+\s+)?"
-    r"[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’.-]{1,30}"
-    r"(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’.-]{1,30}){1,3}"
-)
+GENERIC_EMAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "gmx.de", "gmx.net",
+    "web.de", "icloud.com", "yahoo.com", "yahoo.de", "t-online.de",
+}
+BAD_EMAIL_PREFIXES = {
+    "noreply", "no-reply", "donotreply", "datenschutz", "privacy", "abuse",
+    "postmaster", "webmaster", "newsletter", "marketing",
+}
+EMAIL_PREFIX_SCORES = {
+    "recruiting": 75, "personal": 72, "karriere": 70, "bewerbung": 70,
+    "bewerbungen": 70, "jobs": 65, "hr": 65, "talent": 62, "people": 58,
+    "office": 30, "kontakt": 28, "contact": 28, "info": 24,
+}
+
+PERSON_BAD_TOKENS = {
+    "ihre", "ihr", "unsere", "unser", "wir", "sie", "stellenanzeige", "anzeige",
+    "landet", "direkt", "individuelle", "kundenwunsche", "kundenwuensche", "mit",
+    "physiotherapeut", "physiotherapie", "ergotherapeut", "ergotherapie", "logopade",
+    "logopaede", "logopadie", "examen", "bewerbung", "bewerbungen", "karriere",
+    "kontakt", "team", "personal", "impressum", "telefon", "email", "e-mail",
+    "geschaftsfuhrer", "geschaftsfuhrerin", "geschaftsfuhrung", "geschaeftsfuehrer",
+    "geschaeftsfuehrerin", "geschaeftsfuehrung", "inhaber", "inhaberin", "partner",
+    "recruiting", "human", "resources", "ansprechpartner", "kontaktperson",
+    "deutschland", "stellenangebot", "job", "jobs", "stelle", "stellen",
+}
+
+NAME_CONNECTORS = {"von", "van", "de", "der", "den", "zu", "zur", "zum", "da", "di"}
+TITLE_TOKENS = {"herr", "frau", "dr", "dr.", "prof", "prof.", "dipl", "dipl."}
 
 
-@dataclass
-class ResearchResult:
-    website: str = ""
-    contact_page: str = ""
-    imprint_page: str = ""
-    career_page: str = ""
-    email: str = ""
-    phone: str = ""
-    person: str = ""
-    role: str = ""
-    text: str = ""
-    status: str = "nicht gefunden"
-    notes: str = ""
-    employee_hint: str = ""
-    location_hint: str = ""
-    career_signal: str = ""
-    career_job_count: int = 0
-    career_job_titles: str = ""
-    ats_detected: str = ""
-    pages_crawled: int = 0
-    candidate_count: int = 0
-    errors: list[str] = field(default_factory=list)
+def _serpapi_is_paused() -> bool:
+    return time.monotonic() < _SERPAPI_PAUSED_UNTIL
 
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "website": self.website,
-            "contact_page": self.contact_page,
-            "imprint_page": self.imprint_page,
-            "career_page": self.career_page,
-            "email": self.email,
-            "phone": self.phone,
-            "person": self.person,
-            "role": self.role,
-            "text": self.text,
-            "status": self.status,
-            "notes": self.notes,
-            "employee_hint": self.employee_hint,
-            "location_hint": self.location_hint,
-            "career_signal": self.career_signal,
-            "career_job_count": self.career_job_count,
-            "career_job_titles": self.career_job_titles,
-            "ats_detected": self.ats_detected,
-            "pages_crawled": self.pages_crawled,
-            "candidate_count": self.candidate_count,
-            "errors": self.errors,
-        }
+
+def _pause_serpapi() -> None:
+    global _SERPAPI_PAUSED_UNTIL
+    _SERPAPI_PAUSED_UNTIL = max(_SERPAPI_PAUSED_UNTIL, time.monotonic() + _SERPAPI_PAUSE_SECONDS)
 
 
 def _session() -> requests.Session:
     session = requests.Session()
     retry = Retry(
-        total=2,
-        connect=2,
-        read=2,
-        backoff_factor=0.35,
-        status_forcelist=(500, 502, 503, 504),
-        allowed_methods=("GET",),
+        total=2, connect=2, read=2, backoff_factor=0.35,
+        status_forcelist=(500, 502, 503, 504), allowed_methods=("GET",),
         raise_on_status=False,
     )
     session.mount("https://", HTTPAdapter(max_retries=retry))
@@ -209,8 +136,6 @@ def clean_text(value: Any) -> str:
     if value is None:
         return ""
     value = html.unescape(str(value))
-    # URLs und normale Texte nicht blind als HTML parsen. Das verhindert die
-    # MarkupResemblesLocatorWarning aus den Streamlit Logs.
     if re.search(r"<[A-Za-z][^>]*>", value):
         value = BeautifulSoup(value, "html.parser").get_text(" ")
     return re.sub(r"\s+", " ", value).strip()
@@ -244,14 +169,11 @@ def company_tokens(company: str) -> list[str]:
         "unternehmen", "praxis", "kanzlei", "zentrum", "team", "partner",
         "international", "deutschland", "und", "the", "von", "fur", "fuer",
     }
-    return [
-        token for token in normalize_company(company).split()
-        if len(token) >= 3 and token not in stop
-    ]
+    return [token for token in normalize_company(company).split() if len(token) >= 3 and token not in stop]
 
 
 def root_domain(url: str) -> str:
-    parsed = urlparse(url if "://" in url else "https://" + url)
+    parsed = urlparse(url if "://" in str(url) else "https://" + str(url))
     ext = _EXTRACT(parsed.hostname or "")
     return f"{ext.domain}.{ext.suffix}" if ext.domain and ext.suffix else ""
 
@@ -307,117 +229,49 @@ def _unwrap_search_url(url: str) -> str:
     return url
 
 
-def _candidate_record(url: str, context: str = "", phone: str = "", source: str = "") -> dict[str, str]:
-    return {
-        "url": _unwrap_search_url(url),
-        "context": clean_text(context),
-        "phone": clean_text(phone),
-        "source": source,
-    }
+def _candidate_url_score(url: str, company: str, city: str = "") -> int:
+    if is_blocked_url(url):
+        return -999
+    domain = root_domain(url)
+    domain_base = domain.split(".")[0].replace("-", " ")
+    tokens = company_tokens(company)
+    score = 0
+    for token in tokens[:6]:
+        if token in normalize(domain_base):
+            score += 22
+    compact_domain = re.sub(r"\W+", "", domain_base)
+    compact_company = re.sub(r"\W+", "", normalize_company(company))
+    if compact_company and compact_domain and (compact_company in compact_domain or compact_domain in compact_company):
+        score += 45
+    if city and normalize(city).split(" ")[0] in normalize(url):
+        score += 6
+    if urlparse(url).path in {"", "/"}:
+        score += 4
+    return score
 
 
-def _search_candidates_serpapi(
-    session: requests.Session,
-    company: str,
-    city: str,
-    api_key: str,
-    errors: list[str],
-) -> list[dict[str, str]]:
-    if not api_key:
-        return []
-    if _serpapi_is_paused():
-        errors.append("SerpApi: nach HTTP 429 vorübergehend pausiert")
-        return []
-    # SerpApi ist kostenpflichtig und 429 bedeutet hier häufig ein erschöpftes
-    # Kontingent. Deshalb maximal zwei gezielte Suchen und beim ersten 429 sofort
-    # abbrechen. DuckDuckGo und Domainprüfung übernehmen danach den Fallback.
+def _page_company_score(text: str, title: str, company: str, city: str = "") -> int:
+    haystack = normalize(f"{title} {text[:18000]}")
+    company_norm = normalize_company(company)
+    tokens = company_tokens(company)
+    score = 0
+    if company_norm and len(company_norm) >= 5 and company_norm in haystack:
+        score += 45
+    token_hits = sum(1 for token in tokens[:6] if token in haystack)
+    score += min(36, token_hits * 9)
+    if city and normalize(city) in haystack:
+        score += 12
+    return score
+
+
+def _search_duckduckgo(session: requests.Session, company: str, city: str, errors: list[str]) -> list[dict[str, str]]:
+    output: list[dict[str, str]] = []
     queries = [
-        f'"{company}" {city} offizielle Website Kontakt Impressum'.strip(),
-        f'"{company}" {city} Personal Recruiting Geschäftsführer'.strip(),
-    ]
-    candidates: list[dict[str, str]] = []
-    for query in queries:
-        response, error = _safe_get(
-            session,
-            "https://serpapi.com/search.json",
-            params={"engine": "google", "q": query, "hl": "de", "gl": "de", "api_key": api_key},
-            timeout=30,
-        )
-        if error or not response:
-            message = error or "keine Antwort"
-            errors.append(f"SerpApi: {message}")
-            low = message.lower()
-            if "429" in low or "quota" in low or "limit" in low:
-                # Nicht weiter gegen ein leeres Kontingent feuern.
-                _pause_serpapi()
-                break
-            continue
-        try:
-            payload = response.json()
-        except ValueError:
-            errors.append("SerpApi: ungültige JSON Antwort")
-            continue
-
-        for item in payload.get("organic_results", [])[:12]:
-            link = item.get("link", "")
-            if link:
-                context = " ".join([
-                    str(item.get("title", "")),
-                    str(item.get("snippet", "")),
-                    str(item.get("displayed_link", "")),
-                ])
-                candidates.append(_candidate_record(link, context=context, source="SerpApi organic"))
-
-        knowledge = payload.get("knowledge_graph") or {}
-        if knowledge.get("website"):
-            context = " ".join([
-                str(knowledge.get("title", "")),
-                str(knowledge.get("description", "")),
-                str(knowledge.get("address", "")),
-            ])
-            candidates.append(_candidate_record(
-                knowledge["website"],
-                context=context,
-                phone=str(knowledge.get("phone", "")),
-                source="SerpApi knowledge graph",
-            ))
-
-        local_results = payload.get("local_results") or {}
-        places = local_results.get("places", []) if isinstance(local_results, dict) else []
-        for local in places[:8]:
-            if local.get("website"):
-                context = " ".join([
-                    str(local.get("title", "")),
-                    str(local.get("address", "")),
-                    str(local.get("description", "")),
-                ])
-                candidates.append(_candidate_record(
-                    local["website"],
-                    context=context,
-                    phone=str(local.get("phone", "")),
-                    source="SerpApi local",
-                ))
-        time.sleep(0.08)
-    return candidates
-
-
-def _search_candidates_duckduckgo(
-    session: requests.Session,
-    company: str,
-    city: str,
-    errors: list[str],
-) -> list[dict[str, str]]:
-    candidates: list[dict[str, str]] = []
-    for query in (
         f'"{company}" {city} offizielle Website'.strip(),
-        f'"{company}" {city} Impressum Kontakt'.strip(),
-    ):
-        response, error = _safe_get(
-            session,
-            "https://html.duckduckgo.com/html/",
-            params={"q": query},
-            timeout=25,
-        )
+        f'"{company}" {city} Karriere Impressum'.strip(),
+    ]
+    for query in queries:
+        response, error = _safe_get(session, "https://html.duckduckgo.com/html/", params={"q": query}, timeout=25)
         if error or not response:
             errors.append(f"DuckDuckGo: {error or 'keine Antwort'}")
             continue
@@ -428,82 +282,55 @@ def _search_candidates_duckduckgo(
                 continue
             href = _unwrap_search_url(anchor.get("href", ""))
             snippet = result.select_one(".result__snippet")
-            context = f"{anchor.get_text(' ')} {snippet.get_text(' ') if snippet else ''}"
+            context = clean_text(f"{anchor.get_text(' ')} {snippet.get_text(' ') if snippet else ''}")
             if href:
-                candidates.append(_candidate_record(href, context=context, source="DuckDuckGo"))
-        time.sleep(0.08)
-    return candidates
+                output.append({"url": href, "context": context, "source": "DuckDuckGo"})
+    return output
 
 
-def _candidate_url_score(url: str, company: str, city: str = "") -> int:
-    if is_blocked_url(url):
-        return -999
-    domain = root_domain(url)
-    domain_base = domain.split(".")[0].replace("-", " ")
-    company_norm = normalize_company(company)
-    tokens = company_tokens(company)
-    score = 0
-    compact_domain = re.sub(r"\W+", "", domain_base)
-    compact_company = re.sub(r"\W+", "", company_norm)
-    if compact_company and (compact_company in compact_domain or compact_domain in compact_company):
-        score += 55
-    for token in tokens[:6]:
-        if token in normalize(domain_base):
-            score += 18
-    if city and normalize(city).split(" ")[0] in normalize(url):
-        score += 6
-    parsed = urlparse(url)
-    if parsed.path in {"", "/"}:
-        score += 4
-    if any(term in normalize(url) for term in ("impressum", "kontakt", "karriere")):
-        score += 3
-    return score
-
-
-def _page_company_score(text: str, title: str, company: str, city: str = "") -> int:
-    haystack = normalize(f"{title} {text[:12000]}")
-    tokens = company_tokens(company)
-    score = 0
-    for token in tokens[:6]:
-        if token in haystack:
-            score += 10
-    company_norm = normalize_company(company)
-    if len(company_norm) >= 5 and company_norm in haystack:
-        score += 35
-    if city and normalize(city) in haystack:
-        score += 5
-    return score
-
-
-def _company_domain_guesses(company: str) -> list[str]:
-    """Erzeugt wenige plausible Domains und akzeptiert sie erst nach Inhaltsprüfung."""
-    tokens = company_tokens(company)
-    if not tokens:
+def _search_serpapi(session: requests.Session, company: str, city: str, api_key: str, errors: list[str]) -> list[dict[str, str]]:
+    if not api_key or _serpapi_is_paused():
         return []
-    variants: list[str] = []
-    compact = "".join(tokens[:4])
-    hyphenated = "-".join(tokens[:4])
-    first_two = "".join(tokens[:2])
-    first_two_hyphen = "-".join(tokens[:2])
-    for value in (compact, hyphenated, first_two, first_two_hyphen, tokens[0]):
-        value = re.sub(r"[^a-z0-9-]", "", normalize(value).replace(" ", "-"))
-        if value and value not in variants:
-            variants.append(value)
-    urls: list[str] = []
-    for variant in variants[:3]:
-        for tld in ("de", "com", "at", "ch", "li"):
-            urls.append(f"https://www.{variant}.{tld}")
-    return urls[:8]
-
-
-def _hint_bundle(context: str) -> dict[str, list]:
-    context = clean_text(context)
-    people = extract_people(context) if context else []
-    return {
-        "emails": extract_emails("", context),
-        "phones": extract_phones("", context),
-        "people": people,
-    }
+    output: list[dict[str, str]] = []
+    queries = [
+        f'"{company}" {city} offizielle Website'.strip(),
+        f'"{company}" {city} Karriere Jobs'.strip(),
+    ]
+    for query in queries:
+        response, error = _safe_get(
+            session,
+            "https://serpapi.com/search.json",
+            params={"engine": "google", "q": query, "hl": "de", "gl": "de", "api_key": api_key},
+            timeout=30,
+        )
+        if error or not response:
+            message = error or "keine Antwort"
+            errors.append(f"SerpApi: {message}")
+            if any(token in message.lower() for token in ("429", "quota", "limit")):
+                _pause_serpapi()
+                break
+            continue
+        try:
+            payload = response.json()
+        except ValueError:
+            errors.append("SerpApi: ungueltige JSON Antwort")
+            continue
+        for item in payload.get("organic_results", [])[:12]:
+            link = item.get("link", "")
+            if link:
+                output.append({
+                    "url": link,
+                    "context": clean_text(" ".join([str(item.get("title", "")), str(item.get("snippet", ""))])),
+                    "source": "SerpApi",
+                })
+        knowledge = payload.get("knowledge_graph") or {}
+        if knowledge.get("website"):
+            output.append({
+                "url": knowledge["website"],
+                "context": clean_text(" ".join([str(knowledge.get("title", "")), str(knowledge.get("description", "")), str(knowledge.get("address", ""))])),
+                "source": "SerpApi Knowledge",
+            })
+    return output
 
 
 def discover_official_website(
@@ -512,39 +339,17 @@ def discover_official_website(
     source_urls: Iterable[str] | None = None,
     serpapi_key: str = "",
     session: requests.Session | None = None,
-) -> tuple[str, list[str], list[str], dict[str, list[str]]]:
+) -> tuple[str, list[str], list[str]]:
     session = session or _session()
     errors: list[str] = []
     records: list[dict[str, str]] = []
-
     for source in source_urls or []:
-        source = _unwrap_search_url(source)
+        source = _unwrap_search_url(clean_text(source))
         if source and not is_blocked_url(source):
-            records.append(_candidate_record(homepage_from_url(source), context=company, source="Stellenlink"))
-
-    # Kostenlose Suche zuerst. SerpApi wird nur noch als zweite Stufe genutzt,
-    # wenn Stellenlink, bekannte Domain und DuckDuckGo nicht genug liefern.
-    if len(records) < 2:
-        records.extend(_search_candidates_duckduckgo(session, company, city, errors))
-    if len(records) < 2:
-        records.extend(_search_candidates_serpapi(session, company, city, serpapi_key, errors))
-
-    # Suchtreffer von XING und LinkedIn werden nicht gecrawlt, ihre öffentlichen
-    # Titel und Snippets helfen aber bei Ansprechpartnern und Rollen.
-    search_context = " ".join(record.get("context", "") for record in records)
-    search_hints = _hint_bundle(search_context)
-
-    # Falls Suchdienste blockiert sind oder keine Treffer liefern, werden wenige
-    # plausible Domains getestet. Eine Übernahme erfolgt erst nach Namensprüfung.
-    existing_domains = {root_domain(record.get("url", "")) for record in records if record.get("url")}
-    has_public_candidate = any(
-        record.get("url") and not is_blocked_url(record.get("url", ""))
-        for record in records
-    )
-    if not has_public_candidate:
-        for guessed_url in _company_domain_guesses(company):
-            if root_domain(guessed_url) not in existing_domains:
-                records.append(_candidate_record(guessed_url, context=company, source="Domain Vermutung mit Inhaltsprüfung"))
+            records.append({"url": homepage_from_url(source), "context": company, "source": "Bekannte URL"})
+    records.extend(_search_duckduckgo(session, company, city, errors))
+    if len(records) < 4:
+        records.extend(_search_serpapi(session, company, city, serpapi_key, errors))
 
     merged: dict[str, dict[str, str]] = {}
     for record in records:
@@ -553,192 +358,107 @@ def discover_official_website(
         if not home or not domain or is_blocked_url(home):
             continue
         if domain not in merged:
-            merged[domain] = {"url": home, "context": "", "phone": "", "source": ""}
-        merged[domain]["context"] = clean_text(
-            f"{merged[domain].get('context', '')} {record.get('context', '')}"
-        )
-        merged[domain]["phone"] = merged[domain].get("phone", "") or record.get("phone", "")
-        merged[domain]["source"] = clean_text(
-            f"{merged[domain].get('source', '')} {record.get('source', '')}"
-        )
+            merged[domain] = {"url": home, "context": "", "source": ""}
+        merged[domain]["context"] = clean_text(f"{merged[domain]['context']} {record.get('context', '')}")
+        merged[domain]["source"] = clean_text(f"{merged[domain]['source']} {record.get('source', '')}")
 
-    unique = list(merged.values())
-    unique.sort(
-        key=lambda item: (
-            _candidate_url_score(item["url"], company, city)
-            + _page_company_score(item.get("context", ""), "", company, city)
-        ),
-        reverse=True,
-    )
-
+    candidates = list(merged.values())
+    candidates.sort(key=lambda item: _candidate_url_score(item["url"], company, city), reverse=True)
+    checked: list[str] = []
     best_url = ""
     best_score = -999
-    best_record: dict[str, str] = {}
-    for record in unique[:15]:
-        candidate = record["url"]
-        url_score = _candidate_url_score(candidate, company, city)
-        context_score = _page_company_score(record.get("context", ""), "", company, city)
-        if url_score < 0:
-            continue
-        candidate_timeout = 7 if "Domain Vermutung" in record.get("source", "") else 18
-        response, error = _safe_get(session, candidate, timeout=candidate_timeout)
+    for candidate in candidates[:10]:
+        url = candidate["url"]
+        response, error = _safe_get(session, url, timeout=16)
         if error or not response:
-            errors.append(f"{candidate}: {error}")
             continue
         final_home = homepage_from_url(response.url)
         if is_blocked_url(final_home):
             continue
         soup = BeautifulSoup(response.text, "html.parser")
-        title = clean_text(soup.title.get_text(" ") if soup.title else "")
-        for tag in soup(["script", "style", "noscript", "svg"]):
-            tag.decompose()
-        body_text = clean_text(soup.get_text(" "))
-        page_score = _page_company_score(body_text, title, company, city)
-        score = url_score + context_score + page_score
-        if score > best_score:
-            best_score = score
+        title = soup.title.get_text(" ") if soup.title else ""
+        page_text = soup.get_text(" ")
+        page_score = _page_company_score(page_text, title, company, city)
+        url_score = _candidate_url_score(final_home, company, city)
+        context_score = _page_company_score(candidate.get("context", ""), "", company, city)
+        total = page_score + min(35, max(0, url_score)) + min(20, context_score)
+        checked.append(final_home)
+        # Hohe Mindestschwelle: lieber kein Kontakt als falsche Firma.
+        minimum = 50 if len(company_tokens(company)) >= 2 else 58
+        if page_score < 18 and url_score < 35:
+            continue
+        if total >= minimum and total > best_score:
+            best_score = total
             best_url = final_home
-            best_record = record
-        if score >= 75:
-            break
-
-    # Eine Domain wird nur übernommen, wenn Domain, Suchkontext oder Seiteninhalt
-    # einen echten Bezug zum Firmennamen zeigen. Kleine Firmen haben oft kurze
-    # Websites, deshalb ist die Schwelle bewusst moderat.
-    accepted = best_url if best_score >= 18 else ""
-    hints = search_hints
-    if accepted and best_record:
-        context = best_record.get("context", "")
-        hints["emails"] = list(dict.fromkeys(hints.get("emails", []) + extract_emails("", context)))
-        hints["phones"] = list(dict.fromkeys(
-            hints.get("phones", []) + extract_phones("", f"{best_record.get('phone', '')} {context}")
-        ))
-        hints["people"] = list(hints.get("people", []))
-    return accepted, [item["url"] for item in unique], errors, hints
-
-def _same_site(url: str, homepage: str) -> bool:
-    return bool(root_domain(url)) and root_domain(url) == root_domain(homepage)
+    return best_url, checked, errors
 
 
-def _page_priority(url: str, anchor_text: str = "") -> int:
-    target = normalize(f"{url} {anchor_text}").replace(" ", "-")
-    score = 0
-    for keyword, points in PAGE_KEYWORDS.items():
-        normalized_keyword = normalize(keyword).replace(" ", "-")
-        if normalized_keyword in target:
-            score = max(score, points)
-    return score
+def _same_site(url: str, website: str) -> bool:
+    return bool(root_domain(url) and root_domain(url) == root_domain(website))
 
 
-ATS_HOSTS = (
-    "jobs.personio.de", "greenhouse.io", "lever.co", "workdayjobs.com",
-    "smartrecruiters.com", "join.com", "recruitee.com", "onlyfy.io",
-)
-CAREER_TERMS = (
-    "karriere", "career", "jobs", "stellenangebote", "offene stellen",
-    "bewerbung", "arbeiten bei", "werde teil", "verstärkung", "verstaerkung",
-)
-
-
-def extract_career_links(homepage: str, html_text: str, limit: int = 8) -> list[str]:
+def collect_internal_pages(website: str, html_text: str, max_pages: int = 20) -> list[str]:
     soup = BeautifulSoup(html_text or "", "html.parser")
     scored: list[tuple[int, str]] = []
     seen: set[str] = set()
-    home_domain = root_domain(homepage)
+    home = homepage_from_url(website)
+    if home:
+        scored.append((1000, home))
+        seen.add(home.rstrip("/"))
     for anchor in soup.find_all("a", href=True):
-        href = urljoin(homepage, anchor.get("href", "")).split("#", 1)[0]
-        if not href.startswith("http") or href in seen:
+        url = urljoin(website, anchor.get("href", ""))
+        if not _same_site(url, website):
             continue
-        host = (urlparse(href).hostname or "").lower()
-        label = normalize(f"{anchor.get_text(' ')} {href}")
-        is_ats = any(host.endswith(value) for value in ATS_HOSTS)
-        has_career_term = any(normalize(value) in label for value in CAREER_TERMS)
-        if not (is_ats or has_career_term):
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
             continue
-        score = 100 if has_career_term else 60
-        if root_domain(href) == home_domain:
-            score += 20
-        if is_ats:
-            score += 15
-        seen.add(href)
-        scored.append((score, href))
-    scored.sort(reverse=True)
+        clean_url = url.split("#", 1)[0]
+        key = clean_url.rstrip("/")
+        if key in seen:
+            continue
+        low = normalize(f"{clean_url} {anchor.get_text(' ')}")
+        score = max([points for keyword, points in PAGE_KEYWORDS.items() if normalize(keyword) in low] or [0])
+        if score <= 0:
+            continue
+        seen.add(key)
+        scored.append((score, clean_url))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [url for _, url in scored[:max(1, max_pages)]]
+
+
+def extract_career_links(website: str, html_text: str, limit: int = 10) -> list[str]:
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    scored: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for anchor in soup.find_all("a", href=True):
+        url = urljoin(website, anchor.get("href", ""))
+        low = normalize(f"{url} {anchor.get_text(' ')}")
+        if not any(token in low for token in ("karriere", "career", "jobs", "stellen", "bewerbung")):
+            continue
+        host = (urlparse(url).hostname or "").lower()
+        same = _same_site(url, website)
+        is_ats = any(host == ats or host.endswith("." + ats) for ats in ATS_HOSTS)
+        if not same and not is_ats:
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        score = 100 if same else 90
+        if "jobs" in low or "stellen" in low:
+            score += 10
+        scored.append((score, url))
+    scored.sort(key=lambda item: item[0], reverse=True)
     return [url for _, url in scored[:limit]]
 
 
-def extract_jobposting_titles(html_text: str) -> list[str]:
-    soup = BeautifulSoup(html_text or "", "html.parser")
-    titles: list[str] = []
-    for node in soup.select('script[type="application/ld+json"]'):
-        raw = node.string or node.get_text() or ""
-        if not raw.strip():
-            continue
-        try:
-            data = __import__("json").loads(raw)
-        except Exception:
-            continue
-        queue = data if isinstance(data, list) else [data]
-        while queue:
-            item = queue.pop(0)
-            if isinstance(item, list):
-                queue.extend(item)
-                continue
-            if not isinstance(item, dict):
-                continue
-            graph = item.get("@graph")
-            if isinstance(graph, list):
-                queue.extend(graph)
-            item_type = item.get("@type")
-            types = item_type if isinstance(item_type, list) else [item_type]
-            if "JobPosting" not in types:
-                continue
-            title = clean_text(item.get("title", ""))
-            if title and title.lower() not in {value.lower() for value in titles}:
-                titles.append(title)
-    return titles
-
-
-def career_signal_from_text(text: str, career_url: str = "") -> str:
-    normal = normalize(text)
-    if any(normalize(value) in normal for value in ("wir suchen", "offene stellen", "stellenangebote", "jetzt bewerben", "bewerben sie sich")):
-        return "Aktives Recruiting Signal auf eigener Website"
-    if career_url or any(normalize(value) in normal for value in CAREER_TERMS):
-        return "Karrierebereich vorhanden"
-    return "Kein öffentlicher Personalbedarf gefunden"
-
-
-def collect_internal_pages(homepage: str, html_text: str, max_pages: int = 12) -> list[str]:
-    soup = BeautifulSoup(html_text, "html.parser")
-    scored: dict[str, int] = {homepage: 1000}
-    for anchor in soup.find_all("a", href=True):
-        href = urljoin(homepage, anchor.get("href", ""))
-        href = href.split("#", 1)[0]
-        if not href.startswith("http") or not _same_site(href, homepage):
-            continue
-        priority = _page_priority(href, clean_text(anchor.get_text(" ")))
-        if priority:
-            scored[href] = max(scored.get(href, 0), priority)
-
-    fallback_paths = (
-        "/kontakt", "/contact", "/impressum", "/karriere", "/jobs",
-        "/stellenangebote", "/team", "/ansprechpartner", "/ueber-uns",
-    )
-    for path in fallback_paths:
-        url = urljoin(homepage.rstrip("/") + "/", path.lstrip("/"))
-        scored.setdefault(url, _page_priority(url))
-
-    return [url for url, _ in sorted(scored.items(), key=lambda item: item[1], reverse=True)[:max_pages]]
-
-
 def _deobfuscate_email_text(text: str) -> str:
-    text = html.unescape(text or "")
     replacements = {
-        "[at]": "@", "(at)": "@", "{at}": "@", " [ät] ": "@",
+        "[at]": "@", "(at)": "@", "{at}": "@", " [aet] ": "@", " [ät] ": "@",
         "[dot]": ".", "(dot)": ".", "{dot}": ".",
     }
     for old, new in replacements.items():
         text = text.replace(old, new).replace(old.upper(), new)
-    text = re.sub(r"\s+(?:at|ät)\s+", "@", text, flags=re.I)
+    text = re.sub(r"\s+(?:at|aet|ät)\s+", "@", text, flags=re.I)
     text = re.sub(r"\s+(?:dot|punkt)\s+", ".", text, flags=re.I)
     return text
 
@@ -752,7 +472,6 @@ def extract_emails(html_text: str, page_text: str = "") -> list[str]:
             values.append(unquote(address))
     combined = _deobfuscate_email_text(f"{html_text} {page_text}")
     values.extend(re.findall(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", combined, re.I))
-
     output: list[str] = []
     seen: set[str] = set()
     for email in values:
@@ -761,143 +480,228 @@ def extract_emails(html_text: str, page_text: str = "") -> list[str]:
             continue
         if re.search(r"\.(?:png|jpg|jpeg|gif|svg|webp)$", email):
             continue
+        local, _, domain = email.partition("@")
+        if not local or not domain or domain in GENERIC_EMAIL_DOMAINS and local in BAD_EMAIL_PREFIXES:
+            continue
+        if local in BAD_EMAIL_PREFIXES or any(local.startswith(item) for item in BAD_EMAIL_PREFIXES):
+            continue
         seen.add(email)
         output.append(email)
     return output
 
 
-def choose_email(emails: Iterable[str], website_domain: str, person: str = "") -> str:
-    domain = root_domain(website_domain) or website_domain.lower().lstrip("www.")
-    person_tokens = [
-        token for token in normalize(person).split()
-        if token not in {"frau", "herr", "dr", "prof", "dipl"} and len(token) >= 2
-    ]
-    first_name = person_tokens[0] if person_tokens else ""
-    last_name = person_tokens[-1] if person_tokens else ""
-    best = ""
-    best_score = -999
-    for email in emails:
-        local, _, email_domain = email.lower().partition("@")
-        if not local or not email_domain:
-            continue
-        local_norm = normalize(local).replace(" ", "")
-        score = 0
-        if root_domain("https://" + email_domain) == domain or email_domain == domain:
-            score += 45
+def _email_score(email: str, website_domain: str = "", person: str = "", trusted_site: bool = False) -> int:
+    local, _, email_domain = email.lower().partition("@")
+    if not local or not email_domain:
+        return -999
+    score = 0
+    domain = root_domain("https://" + email_domain)
+    website_root = root_domain(website_domain) or website_domain.lower().removeprefix("www.")
+    if website_root:
+        if domain == website_root or email_domain == website_root:
+            score += 70
+        elif trusted_site:
+            score += 5
         else:
-            score -= 35
-        if local in BAD_EMAIL_PREFIXES or any(local.startswith(item) for item in BAD_EMAIL_PREFIXES):
-            score -= 150
-        if last_name and last_name in local_norm:
-            score += 125
-            if first_name and (first_name in local_norm or local_norm.startswith(first_name[:1] + last_name)):
-                score += 35
-        for prefix, points in EMAIL_PREFIX_SCORES.items():
-            if local == prefix or local.startswith(prefix + ".") or local.startswith(prefix + "-"):
-                score += points
-        if "." in local and not any(char.isdigit() for char in local):
-            score += 25
-        if local.startswith("info") or local.startswith("kontakt"):
-            score -= 15
-        if score > best_score:
-            best_score = score
-            best = email
-    return best if best_score > -50 else ""
+            return -999
+    person_tokens = [t for t in normalize(person).split() if len(t) >= 2 and t not in {"herr", "frau", "dr", "prof"}]
+    if person_tokens:
+        last = person_tokens[-1]
+        first = person_tokens[0]
+        local_norm = normalize(local).replace(" ", "")
+        if last and last in local_norm:
+            score += 55
+            if first and (first in local_norm or local_norm.startswith(first[:1] + last)):
+                score += 20
+    for prefix, points in EMAIL_PREFIX_SCORES.items():
+        if local == prefix or local.startswith(prefix + ".") or local.startswith(prefix + "-"):
+            score += points
+    if "." in local and not any(char.isdigit() for char in local):
+        score += 20
+    if local.startswith("info") or local.startswith("kontakt"):
+        score -= 8
+    return score
+
+
+def choose_email(
+    site_emails: Iterable[str],
+    website_domain: str,
+    person: str = "",
+    fallback_emails: Iterable[str] | None = None,
+) -> str:
+    candidates: list[tuple[int, str]] = []
+    for email in site_emails:
+        candidates.append((_email_score(email, website_domain, person, trusted_site=True), email))
+    for email in fallback_emails or []:
+        candidates.append((_email_score(email, website_domain, person, trusted_site=False), email))
+    candidates = [item for item in candidates if item[0] > -900]
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1] if candidates[0][0] >= 0 else ""
+
+
+def _looks_like_date(value: str) -> bool:
+    text = clean_text(value)
+    patterns = [
+        r"^\d{1,2}[./-]\d{1,2}[./-](?:19|20)?\d{2}$",
+        r"^(?:19|20)\d{2}[./-]\d{1,2}[./-]\d{1,2}$",
+        r"^\d{1,2}\.\d{1,2}\.\d{2,4}$",
+    ]
+    return any(re.fullmatch(pattern, text) for pattern in patterns)
+
+
+def valid_phone(value: str) -> bool:
+    value = clean_text(value).strip(" .,:;-/")
+    if not value or _looks_like_date(value):
+        return False
+    digits = re.sub(r"\D", "", value)
+    if digits.startswith("0049"):
+        digits = "49" + digits[4:]
+    if not 9 <= len(digits) <= 15:
+        return False
+    # Jahreszahlen/Datumsfragmente und offensichtlich fortlaufende IDs vermeiden.
+    if re.fullmatch(r"(?:19|20)\d{6,}", digits):
+        return False
+    return True
 
 
 def extract_phones(html_text: str, page_text: str = "") -> list[str]:
     soup = BeautifulSoup(html_text or "", "html.parser")
     values: list[str] = []
+    # tel:-Links sind die verlaesslichste Quelle.
     for anchor in soup.select('a[href^="tel:"]'):
-        values.append(unquote(anchor.get("href", "")[4:]))
-    values.extend(re.findall(r"(?:\+49|0049|0)[\d\s()/.-]{7,24}", page_text or ""))
+        raw = unquote(anchor.get("href", "")[4:])
+        if raw:
+            values.append(raw)
+    text = page_text or ""
+    labeled = re.compile(
+        r"(?i)(?:telefon|tel\.?|fon|phone|mobil|mobile|zentrale|durchwahl)\s*[:\-]?\s*"
+        r"((?:\+49|0049|0)[\d\s()/.-]{7,24})"
+    )
+    for match in labeled.finditer(text):
+        values.append(match.group(1))
+    # +49/0049 ist auch ohne Label hinreichend eindeutig.
+    values.extend(re.findall(r"(?:\+49|0049)[\d\s()/.-]{7,22}", text))
 
     output: list[str] = []
     seen_digits: set[str] = set()
     for value in values:
-        value = re.sub(r"\s+", " ", value).strip(" .,:;-/")
+        value = re.sub(r"\s+", " ", clean_text(value)).strip(" .,:;-/")
+        if not valid_phone(value):
+            continue
         digits = re.sub(r"\D", "", value)
         if digits.startswith("0049"):
             digits = "49" + digits[4:]
-        if not 8 <= len(digits) <= 16 or digits in seen_digits:
+        if digits in seen_digits:
             continue
         seen_digits.add(digits)
         output.append(value)
     return output
 
 
-def _valid_person(name: str) -> bool:
+def _titlecase_word(word: str) -> bool:
+    word = word.strip(".,;:()[]{}")
+    if not word:
+        return False
+    if normalize(word) in NAME_CONNECTORS:
+        return True
+    if normalize(word) in TITLE_TOKENS:
+        return True
+    # Muss mit Grossbuchstaben beginnen; der Rest darf Bindestrich/Apostroph enthalten.
+    return bool(re.fullmatch(r"[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’.-]{1,30}", word))
+
+
+def valid_person_name(name: str) -> bool:
     name = clean_text(name).strip(" ,;:-")
-    parts = name.split()
-    if not 2 <= len(parts) <= 5:
+    if not name or any(ch in name for ch in "!?=<>@/\\"):
         return False
-    bad = {
-        "gmbh", "gesellschaft", "team", "kontakt", "karriere", "personal",
-        "impressum", "telefon", "email", "deutschland", "geschäftsführung",
-    }
-    normalized_parts = {normalize(part) for part in parts if normalize(part) not in {"frau", "herr", "dr", "prof"}}
-    if normalized_parts & bad:
+    raw_parts = name.split()
+    if not 2 <= len(raw_parts) <= 5:
         return False
-    return sum(1 for part in parts if re.match(r"^(?:Dr\.?|Prof\.?)$|^[A-ZÄÖÜ]", part)) >= 2
+    normalized_parts = [normalize(part) for part in raw_parts]
+    if any(part in PERSON_BAD_TOKENS for part in normalized_parts if part):
+        return False
+    meaningful = [p for p in raw_parts if normalize(p) not in TITLE_TOKENS | NAME_CONNECTORS]
+    if not 2 <= len(meaningful) <= 3:
+        # Vier direkt aufeinanderfolgende Namen sind oft zwei Personen, z.B. "Max Mustermann Erika Beispiel".
+        return False
+    if not all(_titlecase_word(part) for part in raw_parts):
+        return False
+    # Mindestens Vor- und Nachname muessen wie Namen aussehen.
+    if sum(1 for part in meaningful if re.match(r"^[A-ZÄÖÜ]", part)) < 2:
+        return False
+    return True
 
 
 def _role_score(role: str) -> int:
     role_norm = normalize(role)
-    best = 0
-    for key, points in ROLE_SCORES.items():
-        if normalize(key) in role_norm:
-            best = max(best, points)
-    return best
+    return max([points for key, points in ROLE_SCORES.items() if normalize(key) in role_norm] or [0])
+
+
+def _name_candidates(text: str) -> list[str]:
+    # Bewusst case-sensitiv. Das verhindert Satzfragmente wie "Ihre Stellenanzeige landet direkt".
+    token = r"[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’.-]{1,30}"
+    connector = r"(?:von|van|de|der|den|zu|zur|zum|da|di)"
+    title = r"(?:(?:Herr|Frau|Dr\.?|Prof\.?)\s+)?"
+    pattern = rf"{title}{token}(?:\s+(?:{connector}\s+)?{token}){{1,2}}"
+    output: list[str] = []
+    for match in re.finditer(pattern, text):
+        # Keine Teiltreffer aus vier aneinandergereihten Namen erzeugen.
+        # Beispiel aus dem fehlerhaften Bestand: "Martin Dempf Sven Hesselbach".
+        before = text[:match.start()].rstrip()
+        after = text[match.end():].lstrip()
+        if before and re.search(r"[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’.-]{1,30}$", before):
+            continue
+        if after and re.match(r"[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’.-]{1,30}(?:\s|$)", after):
+            continue
+        output.append(match.group(0))
+    return output
 
 
 def extract_people(page_text: str) -> list[tuple[str, str, int]]:
-    text = clean_text(page_text)
-    snippets: list[tuple[str, str]] = []
-    patterns = [
-        rf"(?P<role>{ROLE_PATTERN})\s*(?::|\||,|–|-)?\s*(?P<name>{NAME_PATTERN})",
-        rf"(?P<name>{NAME_PATTERN})\s*(?:\||,|–|-)\s*(?P<role>{ROLE_PATTERN})",
-    ]
-    for pattern in patterns:
-        for match in re.finditer(pattern, text, re.I):
-            snippets.append((match.group("name"), match.group("role")))
-
-    # Zusätzlich zeilenweise, falls Rolle und Name auf getrennten Zeilen stehen.
-    raw_lines = [clean_text(line) for line in re.split(r"[\r\n]+|\s{3,}", page_text or "")]
+    if not page_text:
+        return []
+    raw_lines = [clean_text(line) for line in re.split(r"[\r\n]+|\s{3,}", str(page_text))]
     raw_lines = [line for line in raw_lines if line]
+    # Pro Person nur die strukturell plausibelste Rollen-Zuordnung behalten.
+    best_by_name: dict[str, tuple[str, str, int, int]] = {}
+
     for index, line in enumerate(raw_lines):
         role_match = re.search(ROLE_PATTERN, line, re.I)
         if not role_match:
             continue
-        role = role_match.group(0)
-        for candidate_line in (line, raw_lines[index + 1] if index + 1 < len(raw_lines) else ""):
-            name_match = re.search(NAME_PATTERN, candidate_line)
-            if name_match:
-                snippets.append((name_match.group(0), role))
-                break
+        role = clean_text(role_match.group(0))
+        windows: list[tuple[str, int]] = [(line, 30)]
+        if index + 1 < len(raw_lines) and not re.search(ROLE_PATTERN, raw_lines[index + 1], re.I):
+            windows.append((raw_lines[index + 1], 20))  # Rolle -> Name
+        if index > 0 and not re.search(ROLE_PATTERN, raw_lines[index - 1], re.I):
+            windows.append((raw_lines[index - 1], 15))  # Name -> Rolle
 
-    output: list[tuple[str, str, int]] = []
-    seen: set[tuple[str, str]] = set()
-    for name, role in snippets:
-        name = clean_text(name).strip(" ,;:-")
-        role = clean_text(role)
-        key = (name.lower(), role.lower())
-        if key in seen or not _valid_person(name):
-            continue
-        seen.add(key)
-        output.append((name, role, _role_score(role)))
+        for candidate_line, structure_score in windows:
+            cleaned_line = re.sub(ROLE_PATTERN, " ", candidate_line, flags=re.I)
+            for name in _name_candidates(cleaned_line):
+                name = clean_text(name).strip(" ,;:-")
+                if not valid_person_name(name):
+                    continue
+                key = name.lower()
+                role_score = _role_score(role)
+                ranking = structure_score * 10 + role_score
+                previous = best_by_name.get(key)
+                if previous is None or ranking > previous[3]:
+                    best_by_name[key] = (name, role, role_score, ranking)
+
+    output = [(name, role, role_score) for name, role, role_score, _ in best_by_name.values()]
     output.sort(key=lambda item: item[2], reverse=True)
     return output
 
-
 def extract_employee_hint(text: str) -> str:
-    normalized = clean_text(text)
-    patterns = [
+    values: list[int] = []
+    for pattern in (
         r"(?:über|mehr als|rund|ca\.?|circa)?\s*(\d{2,5})\s+(?:Mitarbeitende|Mitarbeiter(?:innen)?|Beschäftigte)",
         r"Team\s+(?:von|mit)\s+(\d{2,5})",
-    ]
-    values: list[int] = []
-    for pattern in patterns:
-        for match in re.finditer(pattern, normalized, re.I):
+    ):
+        for match in re.finditer(pattern, clean_text(text), re.I):
             try:
                 values.append(int(match.group(1)))
             except ValueError:
@@ -906,20 +710,99 @@ def extract_employee_hint(text: str) -> str:
 
 
 def extract_location_hint(text: str) -> str:
-    normalized = clean_text(text)
-    patterns = [
-        r"(\d{1,3})\s+Standorte",
-        r"an\s+(\d{1,3})\s+Standorten",
-        r"(\d{1,3})\s+Niederlassungen",
-    ]
     values: list[int] = []
-    for pattern in patterns:
-        for match in re.finditer(pattern, normalized, re.I):
+    for pattern in (r"(\d{1,3})\s+Standorte", r"an\s+(\d{1,3})\s+Standorten", r"(\d{1,3})\s+Niederlassungen"):
+        for match in re.finditer(pattern, clean_text(text), re.I):
             try:
                 values.append(int(match.group(1)))
             except ValueError:
                 pass
     return str(max(values)) if values else ""
+
+
+def extract_jobposting_titles(html_text: str) -> list[str]:
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    titles: list[str] = []
+
+    def walk(value: Any):
+        if isinstance(value, dict):
+            t = value.get("@type")
+            if t == "JobPosting" or (isinstance(t, list) and "JobPosting" in t):
+                title = clean_text(value.get("title", ""))
+                if title:
+                    titles.append(title)
+            for nested in value.values():
+                walk(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                walk(nested)
+
+    for script in soup.select('script[type="application/ld+json"]'):
+        raw = script.string or script.get_text(" ")
+        if not raw.strip():
+            continue
+        try:
+            walk(json.loads(raw))
+        except Exception:
+            continue
+    return list(dict.fromkeys(titles))
+
+
+def career_signal_from_text(text: str, career_page: str = "") -> str:
+    low = normalize(text[:50000])
+    if any(term in low for term in ("offene stellen", "stellenangebote", "jetzt bewerben", "bewerben sie sich", "join our team")):
+        return "Aktueller Personalbedarf auf eigener Karrierequelle erkennbar"
+    if career_page:
+        return "Karrierebereich vorhanden, konkrete Vakanz noch nicht strukturiert bestaetigt"
+    return "Kein oeffentlicher Personalbedarf auf Firmenquelle bestaetigt"
+
+
+@dataclass
+class ResearchResult:
+    website: str = ""
+    contact_page: str = ""
+    imprint_page: str = ""
+    career_page: str = ""
+    email: str = ""
+    phone: str = ""
+    person: str = ""
+    role: str = ""
+    text: str = ""
+    status: str = "nicht gefunden"
+    notes: str = ""
+    employee_hint: str = ""
+    location_hint: str = ""
+    career_signal: str = ""
+    career_job_count: int = 0
+    career_job_titles: str = ""
+    ats_detected: str = ""
+    pages_crawled: int = 0
+    candidate_count: int = 0
+    errors: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "website": self.website,
+            "contact_page": self.contact_page,
+            "imprint_page": self.imprint_page,
+            "career_page": self.career_page,
+            "email": self.email,
+            "phone": self.phone,
+            "person": self.person,
+            "role": self.role,
+            "text": self.text,
+            "status": self.status,
+            "notes": self.notes,
+            "employee_hint": self.employee_hint,
+            "location_hint": self.location_hint,
+            "career_signal": self.career_signal,
+            "career_job_count": self.career_job_count,
+            "career_job_titles": self.career_job_titles,
+            "ats_detected": self.ats_detected,
+            "pages_crawled": self.pages_crawled,
+            "candidate_count": self.candidate_count,
+            "errors": self.errors,
+        }
 
 
 def research_company(
@@ -929,12 +812,15 @@ def research_company(
     source_urls: Iterable[str] | None = None,
     source_text: str = "",
     serpapi_key: str = "",
-    max_pages: int = 12,
+    max_pages: int = 20,
 ) -> dict[str, Any]:
     result = ResearchResult()
     session = _session()
-    source_hints = _hint_bundle(source_text)
-    website, candidates, errors, search_hints = discover_official_website(
+    source_emails = extract_emails("", source_text)
+    source_phones = extract_phones("", source_text)
+    source_people = extract_people(source_text)
+
+    website, candidates, errors = discover_official_website(
         company=company,
         city=city,
         source_urls=source_urls,
@@ -943,28 +829,16 @@ def research_company(
     )
     result.candidate_count = len(candidates)
     result.errors.extend(errors[:8])
-
-    combined_hint_emails = list(dict.fromkeys(source_hints.get("emails", []) + search_hints.get("emails", [])))
-    combined_hint_phones = list(dict.fromkeys(source_hints.get("phones", []) + search_hints.get("phones", [])))
-    combined_hint_people = list(source_hints.get("people", [])) + list(search_hints.get("people", []))
-    combined_hint_people.sort(key=lambda item: item[2], reverse=True)
-
-    # Website und öffentliche Suchhinweise werden sofort gespeichert. Viele
-    # Unternehmensseiten blockieren automatisierte Abrufe, obwohl die Domain stimmt.
     result.website = website
-    result.phone = combined_hint_phones[0] if combined_hint_phones else ""
-    if combined_hint_people:
-        result.person, result.role, _ = combined_hint_people[0]
-    if website:
-        result.email = choose_email(combined_hint_emails, root_domain(website), result.person)
-    elif combined_hint_emails:
-        result.email = combined_hint_emails[0]
 
     if not website:
+        # Ohne verifizierte Firmenwebsite nur streng extrahierte Angaben aus dem eigentlichen Jobkontext verwenden.
+        result.phone = source_phones[0] if source_phones else ""
+        if source_people:
+            result.person, result.role, _ = source_people[0]
+        result.email = choose_email([], "", result.person, source_emails)
         result.status = "teilweise" if (result.email or result.phone or result.person) else "nicht gefunden"
-        result.notes = "Keine sicher passende Firmenwebsite gefunden."
-        if result.email or result.phone or result.person:
-            result.notes += " Kontakthinweise aus Stellenanzeige oder öffentlichen Suchtreffern übernommen."
+        result.notes = "Keine sicher passende Firmenwebsite gefunden. Nur streng validierte Kontaktdaten aus der Stellenquelle wurden uebernommen."
         if errors:
             result.notes += " " + " | ".join(errors[:2])
         return result.as_dict()
@@ -972,23 +846,22 @@ def research_company(
     first, error = _safe_get(session, website, timeout=20)
     if error or not first:
         result.status = "teilweise"
-        result.notes = f"Website erkannt, Abruf aber blockiert oder nicht erreichbar: {error}."
-        if result.email or result.phone or result.person:
-            result.notes += " Öffentliche Kontakthinweise wurden trotzdem übernommen."
+        result.notes = f"Firmenwebsite erkannt, Abruf aber blockiert oder nicht erreichbar: {error}."
         return result.as_dict()
 
     website = homepage_from_url(first.url)
     result.website = website
     page_urls = collect_internal_pages(website, first.text, max_pages=max_pages)
-    career_links = extract_career_links(website, first.text, limit=8)
-    external_career_links = [url for url in career_links if not _same_site(url, website)]
+    career_links = extract_career_links(website, first.text, limit=10)
     internal_career_links = [url for url in career_links if _same_site(url, website)]
+    external_career_links = [url for url in career_links if not _same_site(url, website)]
     for url in internal_career_links:
         if url not in page_urls:
             page_urls.insert(1, url)
     page_urls = page_urls[:max_pages]
     if career_links:
         result.career_page = career_links[0]
+
     ats_hosts = sorted({
         (urlparse(url).hostname or "").lower()
         for url in career_links
@@ -997,9 +870,9 @@ def research_company(
     if ats_hosts:
         result.ats_detected = ", ".join(ats_hosts[:3])
 
-    all_emails: list[str] = list(dict.fromkeys(combined_hint_emails))
-    all_phones: list[str] = list(dict.fromkeys(combined_hint_phones))
-    all_people: list[tuple[str, str, int]] = list(combined_hint_people)
+    site_emails: list[str] = []
+    site_phones: list[str] = []
+    site_people: list[tuple[str, str, int]] = []
     all_texts: list[str] = []
     career_job_titles: list[str] = []
     visited: set[str] = set()
@@ -1008,14 +881,13 @@ def research_company(
         if page_url in visited:
             continue
         visited.add(page_url)
-        response = first if homepage_from_url(page_url) == website and page_url.rstrip("/") == website.rstrip("/") else None
+        response = first if page_url.rstrip("/") == website.rstrip("/") else None
         if response is None:
             response, error = _safe_get(session, page_url, timeout=16)
             if error or not response:
                 continue
         if not _same_site(response.url, website):
             continue
-
         soup = BeautifulSoup(response.text, "html.parser")
         for tag in soup(["script", "style", "noscript", "svg", "canvas"]):
             tag.decompose()
@@ -1023,76 +895,90 @@ def research_company(
         clean_page = clean_text(page_text)
         if not clean_page:
             continue
-
         result.pages_crawled += 1
         all_texts.append(clean_page[:30000])
+        site_emails.extend(extract_emails(response.text, page_text))
+        site_phones.extend(extract_phones(response.text, page_text))
+        site_people.extend(extract_people(page_text))
         for title in extract_jobposting_titles(response.text):
             if title.lower() not in {value.lower() for value in career_job_titles}:
                 career_job_titles.append(title)
-        all_emails.extend(extract_emails(response.text, page_text))
-        all_phones.extend(extract_phones(response.text, page_text))
-        all_people.extend(extract_people(page_text))
-
         low_url = normalize(response.url)
         if not result.contact_page and any(term in low_url for term in ("kontakt", "contact")):
             result.contact_page = response.url
         if not result.imprint_page and any(term in low_url for term in ("impressum", "imprint")):
             result.imprint_page = response.url
-        if not result.career_page and any(term in low_url for term in ("karriere", "career", "jobs", "stellenangebote")):
+        if not result.career_page and any(term in low_url for term in ("karriere", "career", "jobs", "stellen")):
             result.career_page = response.url
 
-    # Externe ATS Links werden separat geprüft, ohne die Firmenwebsite zu verlassen.
-    for career_url in external_career_links[:3]:
+    for career_url in external_career_links[:4]:
         response, error = _safe_get(session, career_url, timeout=18)
         if error or not response:
             continue
-        if "html" not in response.headers.get("content-type", "").lower():
-            continue
-        page_text = BeautifulSoup(response.text, "html.parser").get_text(" ")
+        page_text = BeautifulSoup(response.text, "html.parser").get_text("\n")
         clean_page = clean_text(page_text)
         if clean_page:
             all_texts.append(clean_page[:20000])
+        # Externe ATS-Seiten duerfen Jobs liefern, aber keine Ansprechpartner/E-Mails fuer die Firma ueberschreiben.
         for title in extract_jobposting_titles(response.text):
             if title.lower() not in {value.lower() for value in career_job_titles}:
                 career_job_titles.append(title)
 
     combined_text = " ".join(all_texts)
-    result.text = combined_text[:45000]
-    result.phone = all_phones[0] if all_phones else ""
+    result.text = combined_text[:50000]
 
-    if all_people:
-        all_people.sort(key=lambda item: item[2], reverse=True)
-        result.person, result.role, _ = all_people[0]
+    # Firmenwebsite hat Vorrang; Stellenquelle nur als Fallback.
+    unique_site_phones = list(dict.fromkeys(site_phones))
+    result.phone = unique_site_phones[0] if unique_site_phones else (source_phones[0] if source_phones else "")
 
-    result.email = choose_email(all_emails, root_domain(website), result.person)
+    unique_people: dict[tuple[str, str], tuple[str, str, int]] = {}
+    for person in site_people:
+        unique_people[(person[0].lower(), person[1].lower())] = person
+    people = list(unique_people.values())
+    people.sort(key=lambda item: item[2], reverse=True)
+    if people:
+        result.person, result.role, _ = people[0]
+    elif source_people:
+        result.person, result.role, _ = source_people[0]
+
+    result.email = choose_email(
+        list(dict.fromkeys(site_emails)),
+        root_domain(website),
+        result.person,
+        source_emails,
+    )
 
     result.employee_hint = extract_employee_hint(combined_text)
     result.location_hint = extract_location_hint(combined_text)
     result.career_job_count = len(career_job_titles)
-    result.career_job_titles = " | ".join(career_job_titles[:12])
+    result.career_job_titles = " | ".join(career_job_titles[:20])
     result.career_signal = career_signal_from_text(combined_text, result.career_page)
     if result.career_job_count:
-        result.career_signal = f"{result.career_job_count} konkrete Stellen auf eigener Karrierequelle erkannt"
+        result.career_signal = f"{result.career_job_count} konkrete Stellen auf Firmen- oder ATS-Quelle erkannt"
 
-    if result.website and (result.email or result.phone) and result.pages_crawled >= 2:
-        result.status = "vollständig"
+    if result.website and result.pages_crawled >= 2:
+        result.status = "vollständig" if (result.email or result.phone or result.person or result.career_job_count) else "teilweise"
     elif result.website:
         result.status = "teilweise"
     else:
         result.status = "nicht gefunden"
 
     found = []
+    if result.website:
+        found.append("Website")
+    if result.career_page:
+        found.append("Karriere")
+    if result.person:
+        found.append("Ansprechpartner")
     if result.email:
         found.append("E-Mail")
     if result.phone:
         found.append("Telefon")
-    if result.person:
-        found.append("Ansprechpartner")
+    if result.career_job_count:
+        found.append(f"{result.career_job_count} Jobs")
     result.notes = (
-        f"{result.pages_crawled} Seiten geprüft. "
-        + ("Gefunden: " + ", ".join(found) + ". " if found else "Keine direkten Kontaktdaten gefunden. ")
-        + f"Karriere: {result.career_signal}."
+        "Strenge Recherche: " + ", ".join(found)
+        if found else
+        "Firmenwebsite geprueft, aber keine belastbaren Kontakt- oder Karrieredaten gefunden."
     )
-    if result.errors and not found:
-        result.notes += " Hinweise: " + " | ".join(result.errors[:2])
     return result.as_dict()
