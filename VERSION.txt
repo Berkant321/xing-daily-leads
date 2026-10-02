@@ -1,0 +1,4 @@
+XING Lead Claim Engine V12.0.0
+Built for Berkant321/xing-daily-leads
+Files: app.py, claim_engine.py, requirements.txt
+Existing scanner.py and research.py are reused.
