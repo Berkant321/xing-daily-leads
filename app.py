@@ -325,13 +325,13 @@ def portal_import_jobs(frame: pd.DataFrame, source_name: str) -> list[dict[str, 
     description_col = find_column(frame, ("description", "beschreibung", "text", "snippet"))
     if not company_col or not title_col:
         raise ValueError("Für Portalimporte brauche ich mindestens Firmen- und Positionsspalte.")
-    jobs = []
+    imported_jobs = []
     for _, row in frame.iterrows():
         company = clean_text(row.get(company_col, ""))
         title = clean_text(row.get(title_col, ""))
         if not company or not title:
             continue
-        jobs.append({
+        imported_jobs.append({
             "company": company,
             "title": title,
             "city": clean_text(row.get(city_col, "")) if city_col else "",
@@ -346,7 +346,130 @@ def portal_import_jobs(frame: pd.DataFrame, source_name: str) -> list[dict[str, 
             "size_fit": "Mittel",
             "lead_segment": "Direktkunde",
         })
-    return jobs
+    return imported_jobs
+
+
+def _nonempty(series: pd.Series) -> pd.Series:
+    return series.fillna("").astype(str).str.strip().ne("")
+
+
+def _pipe_unique(*values: Any) -> str:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        for part in str(value or "").split("|"):
+            item = clean_text(part)
+            key = item.lower()
+            if item and key not in seen:
+                seen.add(key)
+                result.append(item)
+    return " | ".join(result)
+
+
+def _lead_professions(row: pd.Series | dict[str, Any]) -> str:
+    return _pipe_unique(
+        row.get("verified_job_titles", ""),
+        row.get("job_titles", ""),
+        row.get("offene_stellen", ""),
+    )
+
+
+def _lead_view(frame: pd.DataFrame) -> pd.DataFrame:
+    frame = migrate_leads(frame)
+    if frame.empty:
+        return pd.DataFrame(columns=[
+            "Firma", "Gesuchte Berufe", "Ort", "Ansprechpartner", "Rolle",
+            "E-Mail", "Telefon", "Website", "Karriere", "Quellen", "Stellen",
+            "Verifiziert", "Claim", "Claim Score", "Bedarf", "Research", "CRM",
+        ])
+    view = pd.DataFrame(index=frame.index)
+    view["Firma"] = frame["firma"]
+    view["Gesuchte Berufe"] = frame.apply(_lead_professions, axis=1)
+    view["Ort"] = frame["orte"]
+    view["Ansprechpartner"] = frame["ansprechpartner"]
+    view["Rolle"] = frame["rolle"]
+    view["E-Mail"] = frame["email"]
+    view["Telefon"] = frame["telefon"]
+    view["Website"] = frame["website"]
+    view["Karriere"] = frame["karriereseite"]
+    view["Quellen"] = frame["source_list"]
+    view["Stellen"] = pd.to_numeric(frame["anzahl_stellen"], errors="coerce").fillna(0).astype(int)
+    view["Verifiziert"] = pd.to_numeric(frame["verified_open_jobs"], errors="coerce").fillna(0).astype(int)
+    view["Claim"] = frame["claim_status"]
+    view["Claim Score"] = pd.to_numeric(frame["claim_score"], errors="coerce").fillna(0).astype(int)
+    view["Bedarf"] = pd.to_numeric(frame["need_score"], errors="coerce").fillna(0).astype(int)
+    view["Research"] = frame["research_depth"]
+    view["CRM"] = frame["crm_status"]
+    return view
+
+
+def show_leads(frame: pd.DataFrame, *, max_rows: int = 1000) -> None:
+    view = _lead_view(frame).head(max_rows)
+    st.dataframe(
+        view,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Website": st.column_config.LinkColumn("Website"),
+            "Karriere": st.column_config.LinkColumn("Karriere"),
+            "Claim Score": st.column_config.NumberColumn("Claim Score", format="%d"),
+            "Bedarf": st.column_config.NumberColumn("Bedarf", format="%d"),
+            "Stellen": st.column_config.NumberColumn("Stellen", format="%d"),
+            "Verifiziert": st.column_config.NumberColumn("Verifiziert", format="%d"),
+        },
+    )
+
+
+def filter_leads_ui(frame: pd.DataFrame, key_prefix: str, *, default_claimable: bool = False) -> pd.DataFrame:
+    frame = migrate_leads(frame).copy()
+    c1, c2, c3, c4 = st.columns(4)
+    search = c1.text_input("Firma / Beruf / Kontakt", key=f"{key_prefix}_search")
+    only_person = c2.checkbox("Nur mit Ansprechpartner", key=f"{key_prefix}_person")
+    only_email = c3.checkbox("Nur mit E-Mail", key=f"{key_prefix}_email")
+    only_phone = c4.checkbox("Nur mit Telefon", key=f"{key_prefix}_phone")
+
+    c5, c6, c7 = st.columns(3)
+    claim_options = ["Alle", "CLAIMABLE", "RESEARCH", "REVIEW", "EXCLUDE"]
+    default_claim_index = 1 if default_claimable else 0
+    claim_filter = c5.selectbox("Claim Status", claim_options, index=default_claim_index, key=f"{key_prefix}_claim")
+    profession = c6.text_input("Beruf enthält", key=f"{key_prefix}_profession")
+    only_verified = c7.checkbox("Nur mit verifizierter Stelle", key=f"{key_prefix}_verified")
+
+    if search:
+        needle = search.strip()
+        searchable = (
+            frame["firma"].astype(str) + " " + frame["job_titles"].astype(str) + " "
+            + frame["verified_job_titles"].astype(str) + " " + frame["offene_stellen"].astype(str) + " "
+            + frame["ansprechpartner"].astype(str) + " " + frame["rolle"].astype(str) + " "
+            + frame["email"].astype(str) + " " + frame["telefon"].astype(str)
+        )
+        frame = frame[searchable.str.contains(needle, case=False, na=False, regex=False)]
+    if profession:
+        profession_text = (
+            frame["job_titles"].astype(str) + " "
+            + frame["verified_job_titles"].astype(str) + " "
+            + frame["offene_stellen"].astype(str)
+        )
+        frame = frame[profession_text.str.contains(profession.strip(), case=False, na=False, regex=False)]
+    if only_person:
+        frame = frame[_nonempty(frame["ansprechpartner"])]
+    if only_email:
+        frame = frame[_nonempty(frame["email"])]
+    if only_phone:
+        frame = frame[_nonempty(frame["telefon"])]
+    if only_verified:
+        frame = frame[pd.to_numeric(frame["verified_open_jobs"], errors="coerce").fillna(0) > 0]
+    if claim_filter != "Alle":
+        frame = frame[frame["claim_status"] == claim_filter]
+
+    frame["_claim"] = pd.to_numeric(frame["claim_score"], errors="coerce").fillna(0)
+    frame["_need"] = pd.to_numeric(frame["need_score"], errors="coerce").fillna(0)
+    frame["_contact"] = (
+        _nonempty(frame["ansprechpartner"]).astype(int)
+        + _nonempty(frame["email"]).astype(int)
+        + _nonempty(frame["telefon"]).astype(int)
+    )
+    return frame.sort_values(["_contact", "_claim", "_need"], ascending=[False, False, False])
 
 
 if "data_loaded" not in st.session_state:
@@ -372,15 +495,18 @@ adzuna_app_id = secret_text("adzuna_app_id")
 adzuna_api_key = secret_text("adzuna_api_key")
 
 st.sidebar.title("Lead Claim Engine")
-st.sidebar.caption(f"V{CLAIM_ENGINE_VERSION}")
-page = st.sidebar.radio("Bereich", ["Dashboard", "Discovery", "Deep Research", "Claim Queue", "Stellen", "Salesforce", "System"])
+st.sidebar.caption(f"V{CLAIM_ENGINE_VERSION} · Kontakt-UI")
+page = st.sidebar.radio(
+    "Bereich",
+    ["Dashboard", "Discovery", "Deep Research", "Alle Leads", "Claim Queue", "Stellen", "Salesforce", "System"],
+)
 st.sidebar.write(f"Speicher: {'Google Sheets' if storage.mode == 'google' else 'lokal'}")
 if storage.book_title:
     st.sidebar.caption(storage.book_title)
     st.sidebar.link_button("Google Sheet öffnen", storage.book_url)
 st.sidebar.write(f"SerpApi: {'bereit' if serpapi_key else 'fehlt'}")
 st.sidebar.write(f"Adzuna: {'bereit' if adzuna_app_id and adzuna_api_key else 'fehlt'}")
-st.sidebar.caption("KI-Mailtexte sind bewusst kein Kernkriterium mehr.")
+st.sidebar.caption("Kontakte + gesuchte Berufe stehen wieder im Mittelpunkt.")
 
 if st.sidebar.button("Daten neu laden"):
     st.cache_resource.clear()
@@ -390,41 +516,40 @@ if st.sidebar.button("Daten neu laden"):
 
 
 if page == "Dashboard":
-    st.title("Lead Claim Engine")
-    st.caption("Jobportale liefern Signale. Die Engine macht daraus verifizierte Arbeitgeber-Leads.")
+    st.title("Lead Cockpit")
+    st.caption("Firmen, gesuchte Berufe und Kontaktdaten zuerst. Claim- und Research-Scores dienen nur zur Priorisierung.")
+
     claimable = leads[leads["claim_status"] == "CLAIMABLE"]
-    research_open = leads[leads["claim_status"] == "RESEARCH"]
-    deep = leads[leads["research_depth"] == "deep"]
     verified = leads[pd.to_numeric(leads["verified_open_jobs"], errors="coerce").fillna(0) > 0]
+    with_person = int(_nonempty(leads["ansprechpartner"]).sum())
+    with_email = int(_nonempty(leads["email"]).sum())
+    with_phone = int(_nonempty(leads["telefon"]).sum())
+
     cols = st.columns(7)
     cols[0].metric("Firmen", len(leads))
     cols[1].metric("Stellen", len(jobs))
-    cols[2].metric("Evidence", len(evidence))
-    cols[3].metric("Offiziell verifiziert", len(verified))
-    cols[4].metric("Deep Research", len(deep))
-    cols[5].metric("Research offen", len(research_open))
+    cols[2].metric("Ansprechpartner", with_person)
+    cols[3].metric("E-Mail", with_email)
+    cols[4].metric("Telefon", with_phone)
+    cols[5].metric("Verifizierte Jobs", len(verified))
     cols[6].metric("CLAIMABLE", len(claimable))
 
-    st.subheader("Top Leads")
-    table = leads.copy()
-    table["claim_score_num"] = pd.to_numeric(table["claim_score"], errors="coerce").fillna(0)
-    table["need_score_num"] = pd.to_numeric(table["need_score"], errors="coerce").fillna(0)
-    table = table.sort_values(["claim_score_num", "need_score_num"], ascending=False)
-    st.dataframe(
-        table[[
-            "claim_status", "claim_score", "need_score", "firma", "lead_segment", "size_fit",
-            "verified_open_jobs", "anzahl_stellen", "job_source_count", "source_list", "website",
-            "karriereseite", "ats_detected", "research_depth", "crm_status",
-        ]].head(250),
-        hide_index=True,
-        width="stretch",
-        column_config={"website": st.column_config.LinkColumn("Website"), "karriereseite": st.column_config.LinkColumn("Karriere")},
+    st.subheader("Beste Leads")
+    dashboard = leads.copy()
+    dashboard["_claim"] = pd.to_numeric(dashboard["claim_score"], errors="coerce").fillna(0)
+    dashboard["_need"] = pd.to_numeric(dashboard["need_score"], errors="coerce").fillna(0)
+    dashboard["_contact"] = (
+        _nonempty(dashboard["ansprechpartner"]).astype(int)
+        + _nonempty(dashboard["email"]).astype(int)
+        + _nonempty(dashboard["telefon"]).astype(int)
     )
+    dashboard = dashboard.sort_values(["_contact", "_claim", "_need"], ascending=[False, False, False])
+    show_leads(dashboard, max_rows=300)
 
 
 elif page == "Discovery":
     st.title("Discovery")
-    st.caption("Mehrere Portale dürfen denselben Arbeitgeber finden. Die Evidence wird behalten und später zusammengeführt.")
+    st.caption("Mehrere Portale dürfen denselben Arbeitgeber finden. Gesuchte Berufe und Quellen werden pro Firma zusammengeführt.")
     campaign = st.selectbox("Kampagne", list(CAMPAIGNS))
     default_terms = CAMPAIGNS[campaign]
     terms_text = st.text_area("Suchbegriffe", "\n".join(default_terms), height=260)
@@ -444,7 +569,11 @@ elif page == "Discovery":
 
     if st.button("Discovery starten", type="primary"):
         terms = [line.strip() for line in terms_text.splitlines() if line.strip()]
-        regions = parse_regions(regions_text)
+        try:
+            regions = parse_regions(regions_text)
+        except Exception as exc:
+            st.error(str(exc))
+            st.stop()
         if not terms:
             st.error("Keine Suchbegriffe.")
             st.stop()
@@ -452,11 +581,16 @@ elif page == "Discovery":
         selected_terms = [terms[(cursor + i) % len(terms)] for i in range(min(terms_per_run, len(terms)))]
         st.session_state["term_cursor"] = (cursor + len(selected_terms)) % len(terms)
         sources = []
-        if use_ba: sources.append("Bundesagentur")
-        if use_adzuna: sources.append("Adzuna")
-        if use_google: sources.append("Google Jobs")
-        if use_radar: sources.append("Google Firmenradar")
-        if use_careers: sources.append("Karriereseiten")
+        if use_ba:
+            sources.append("Bundesagentur")
+        if use_adzuna:
+            sources.append("Adzuna")
+        if use_google:
+            sources.append("Google Jobs")
+        if use_radar:
+            sources.append("Google Firmenradar")
+        if use_careers:
+            sources.append("Karriereseiten")
         if not sources:
             st.error("Mindestens eine Quelle aktivieren.")
             st.stop()
@@ -484,19 +618,33 @@ elif page == "Discovery":
             save_leads(leads)
             save_evidence(evidence)
             logs = append_log(
-                logs, scan_id=scan_id, stage="Discovery", status="completed",
-                processed_terms=" | ".join(selected_terms), processed_items=str(len(selected_terms)),
-                found_jobs=str(len(fresh)), new_leads=str(inserted), updated_leads=str(updated),
+                logs,
+                scan_id=scan_id,
+                stage="Discovery",
+                status="completed",
+                processed_terms=" | ".join(selected_terms),
+                processed_items=str(len(selected_terms)),
+                found_jobs=str(len(fresh)),
+                new_leads=str(inserted),
+                updated_leads=str(updated),
                 message=f"{len(fresh)} Treffer aus {', '.join(sources)}",
             )
             st.session_state.update({"jobs": jobs, "leads": leads, "evidence": evidence, "logs": logs})
         st.success(f"{len(fresh)} Treffer verarbeitet · {inserted} neue Stellen · {updated} aktualisiert.")
+        if not fresh.empty:
+            st.subheader("Neu verarbeitete Stellen")
+            st.dataframe(
+                fresh[["firma", "position", "ort", "quelle", "ansprechpartner", "email", "telefon", "stellenlink"]].head(500),
+                hide_index=True,
+                width="stretch",
+                column_config={"stellenlink": st.column_config.LinkColumn("Stellenlink")},
+            )
         with st.expander("Diagnose"):
             st.write("\n".join(diagnostics))
 
     st.divider()
     st.subheader("Beliebiges Jobportal importieren")
-    st.caption("Wenn ein Portal CSV/XLSX exportiert, kannst du es hier unabhängig von der Portalstruktur einspeisen.")
+    st.caption("CSV/XLSX mit Firma und Position genügt. Die Quelle bleibt als Evidence erhalten.")
     portal_name = st.text_input("Portalname", "Externes Jobportal")
     portal_file = st.file_uploader("CSV oder XLSX mit Firmen und Stellen", type=["csv", "xlsx"], key="portal_import")
     if portal_file is not None and st.button("Portaldatei übernehmen"):
@@ -508,29 +656,34 @@ elif page == "Discovery":
         leads = rebuild_leads(jobs, leads, portal_name)
         leads = apply_crm_exclusions(leads, exclusions)
         evidence = build_evidence_from_jobs(jobs)
-        save_jobs(jobs); save_leads(leads); save_evidence(evidence)
+        save_jobs(jobs)
+        save_leads(leads)
+        save_evidence(evidence)
         st.session_state.update({"jobs": jobs, "leads": leads, "evidence": evidence})
         st.success(f"{len(fresh)} Portalzeilen importiert · {inserted} neu · {updated} aktualisiert.")
 
 
 elif page == "Deep Research":
     st.title("Deep Research")
-    st.caption("Website, Sitemap, Karrierebereich, ATS und strukturierte JobPosting-Daten werden geprüft. E-Mail ist nur Zusatzinformation.")
+    st.caption("Website, Karriere, ATS, Stellen und Kontaktdaten werden gemeinsam recherchiert. Ansprechpartner, E-Mail und Telefon bleiben zentrale Ergebnisse.")
     limit = st.slider("Firmen pro Lauf", 1, 50, 15)
     candidate_indices = deep_research_candidates(leads, limit)
     st.write(f"Aktuell priorisiert: **{len(candidate_indices)}** Firmen")
     if candidate_indices:
-        preview = leads.loc[candidate_indices, ["firma", "need_score", "claim_score", "source_list", "anzahl_stellen", "research_depth"]]
-        st.dataframe(preview, hide_index=True, width="stretch")
+        preview = leads.loc[candidate_indices].copy()
+        show_leads(preview, max_rows=50)
+
     if st.button("Deep Research starten", type="primary", disabled=not candidate_indices):
         progress = st.progress(0.0)
         details = []
+        researched_indices: list[int] = []
         for pos, index in enumerate(candidate_indices, start=1):
             progress.progress((pos - 1) / max(1, len(candidate_indices)), text=f"{pos}/{len(candidate_indices)} {leads.at[index, 'firma']}")
             try:
                 updated, diagnostics = deep_research_lead(leads.loc[index].to_dict(), serpapi_key=serpapi_key)
                 for column in LEAD_COLUMNS:
                     leads.at[index, column] = updated.get(column, leads.at[index, column])
+                researched_indices.append(index)
                 details.extend(diagnostics)
             except Exception as exc:
                 leads.at[index, "research_attempts"] = str(safe_int(leads.at[index, "research_attempts"], 0) + 1)
@@ -541,50 +694,77 @@ elif page == "Deep Research":
         st.session_state["leads"] = leads
         progress.empty()
         st.success("Deep Research gespeichert.")
-        with st.expander("Recherche-Details", expanded=True):
+        if researched_indices:
+            st.subheader("Recherche-Ergebnis")
+            show_leads(leads.loc[researched_indices], max_rows=50)
+        with st.expander("Recherche-Details", expanded=False):
             st.write("\n".join(details))
+
+
+elif page == "Alle Leads":
+    st.title("Alle Leads")
+    st.caption("Arbeitsansicht für Firmen, gesuchte Berufe und Kontaktdaten.")
+    filtered = filter_leads_ui(leads, "all_leads")
+    st.write(f"**{len(filtered)}** Leads im Filter")
+    show_leads(filtered, max_rows=3000)
+    export = filtered.drop(columns=["_claim", "_need", "_contact"], errors="ignore")
+    st.download_button(
+        "Gefilterte Leads als CSV",
+        export.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"xing_leads_{date.today().isoformat()}.csv",
+        mime="text/csv",
+    )
 
 
 elif page == "Claim Queue":
     st.title("Claim Queue")
-    st.caption("Hier zählen Arbeitgeberqualität, aktueller Recruiting-Bedarf, Evidenz und Salesforce-Neuheit – nicht Mailtext.")
-    status_filter = st.multiselect("Status", ["CLAIMABLE", "RESEARCH", "REVIEW", "EXCLUDE"], default=["CLAIMABLE"])
-    min_claim = st.slider("Mindestens Claim Score", 0, 100, 60)
-    min_need = st.slider("Mindestens Need Score", 0, 100, 50)
-    filtered = leads[
-        leads["claim_status"].isin(status_filter)
-        & (pd.to_numeric(leads["claim_score"], errors="coerce").fillna(0) >= min_claim)
-        & (pd.to_numeric(leads["need_score"], errors="coerce").fillna(0) >= min_need)
-    ].copy()
-    filtered["_claim"] = pd.to_numeric(filtered["claim_score"], errors="coerce").fillna(0)
-    filtered["_need"] = pd.to_numeric(filtered["need_score"], errors="coerce").fillna(0)
-    filtered = filtered.sort_values(["_claim", "_need"], ascending=False)
+    st.caption("Kontaktdaten und gesuchte Berufe stehen vorne. Scores helfen nur bei der Reihenfolge.")
+    filtered = filter_leads_ui(leads, "claim_queue", default_claimable=True)
+
+    min_claim, min_need = st.columns(2)
+    min_claim_score = min_claim.slider("Mindestens Claim Score", 0, 100, 50)
+    min_need_score = min_need.slider("Mindestens Need Score", 0, 100, 40)
+    filtered = filtered[
+        (pd.to_numeric(filtered["claim_score"], errors="coerce").fillna(0) >= min_claim_score)
+        & (pd.to_numeric(filtered["need_score"], errors="coerce").fillna(0) >= min_need_score)
+    ]
     st.metric("Leads im Filter", len(filtered))
-    st.dataframe(
-        filtered[[
-            "claim_status", "claim_score", "need_score", "firma", "canonical_company", "lead_segment",
-            "size_fit", "verified_open_jobs", "verified_job_titles", "anzahl_stellen", "job_source_count",
-            "source_list", "veroeffentlicht_am", "website", "karriereseite", "ats_detected",
-            "company_confidence", "research_score", "research_depth", "telefon", "email", "crm_status",
-            "claim_reason", "need_confidence",
-        ]],
-        hide_index=True,
-        width="stretch",
-        column_config={"website": st.column_config.LinkColumn("Website"), "karriereseite": st.column_config.LinkColumn("Karriere")},
+    show_leads(filtered, max_rows=2000)
+    export = filtered.drop(columns=["_claim", "_need", "_contact"], errors="ignore")
+    st.download_button(
+        "Claim Queue als CSV",
+        export.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"claimable_leads_{date.today().isoformat()}.csv",
+        mime="text/csv",
     )
-    csv = filtered.drop(columns=["_claim", "_need"], errors="ignore").to_csv(index=False).encode("utf-8-sig")
-    st.download_button("Claim Queue als CSV", csv, file_name=f"claimable_leads_{date.today().isoformat()}.csv", mime="text/csv")
 
 
 elif page == "Stellen":
     st.title("Stellen & Evidence")
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Stellenzeilen", len(jobs))
     c2.metric("Quellenbelege", len(evidence))
     c3.metric("Arbeitgeber", jobs["firma"].nunique() if not jobs.empty else 0)
+    c4.metric("Stellen mit Kontakt", int((_nonempty(jobs["email"]) | _nonempty(jobs["telefon"]) | _nonempty(jobs["ansprechpartner"])).sum()) if not jobs.empty else 0)
+
+    job_search = st.text_input("Firma / Beruf / Kontakt durchsuchen", key="job_search")
+    filtered_jobs = jobs.copy()
+    if job_search:
+        searchable = (
+            filtered_jobs["firma"].astype(str) + " " + filtered_jobs["position"].astype(str) + " "
+            + filtered_jobs["ort"].astype(str) + " " + filtered_jobs["ansprechpartner"].astype(str) + " "
+            + filtered_jobs["email"].astype(str) + " " + filtered_jobs["telefon"].astype(str)
+        )
+        filtered_jobs = filtered_jobs[searchable.str.contains(job_search.strip(), case=False, na=False, regex=False)]
+
     st.dataframe(
-        jobs[["firma", "position", "ort", "veroeffentlicht_am", "source_portal", "quelle", "stellenlink", "times_seen", "kampagne"]].head(3000),
-        hide_index=True, width="stretch", column_config={"stellenlink": st.column_config.LinkColumn("Quelle")},
+        filtered_jobs[[
+            "firma", "position", "ort", "ansprechpartner", "email", "telefon",
+            "veroeffentlicht_am", "source_portal", "quelle", "stellenlink", "times_seen", "kampagne",
+        ]].head(5000),
+        hide_index=True,
+        width="stretch",
+        column_config={"stellenlink": st.column_config.LinkColumn("Stellenlink")},
     )
     with st.expander("Evidence anzeigen"):
         st.dataframe(evidence.head(5000), hide_index=True, width="stretch")
@@ -629,7 +809,9 @@ elif page == "System":
     metrics = {
         "Leads ohne Firma": int((leads["firma"].astype(str).str.strip() == "").sum()),
         "Jobs ohne Firma": int((jobs["firma"].astype(str).str.strip() == "").sum()),
-        "Leads ohne CRM-Abgleich": int((leads["crm_status"].astype(str).str.strip() == "").sum()),
+        "Mit Ansprechpartner": int(_nonempty(leads["ansprechpartner"]).sum()),
+        "Mit E-Mail": int(_nonempty(leads["email"]).sum()),
+        "Mit Telefon": int(_nonempty(leads["telefon"]).sum()),
         "Deep Research": int((leads["research_depth"] == "deep").sum()),
         "Claimable": int((leads["claim_status"] == "CLAIMABLE").sum()),
     }
